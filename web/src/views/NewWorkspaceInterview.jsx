@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { api } from "../api.js";
+import { Markdown } from "../Markdown.jsx";
 import { Icon, Loading } from "../ui.jsx";
 import { Footer } from "./Landing.jsx";
 
@@ -696,10 +697,10 @@ export default function NewWorkspaceInterview({
                           fontSize: "0.87rem",
                           color: isAdvocate ? "var(--text)" : "var(--white)",
                           lineHeight: 1.62,
-                          whiteSpace: "pre-line",
+                          ...(isAdvocate ? null : { whiteSpace: "pre-line" }),
                         }}
                       >
-                        {m.text}
+                        {isAdvocate ? <Markdown>{m.text}</Markdown> : m.text}
                       </div>
                     </div>
                   );

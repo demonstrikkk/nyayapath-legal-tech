@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { Markdown } from "../Markdown.jsx";
 import { Icon, Loading, Notice, Tag } from "../ui.jsx";
 
 const SAMPLE_STARTERS = [
@@ -426,10 +427,10 @@ export default function AdvocateChat({
                         : { borderTopLeftRadius: 2, background: "var(--gray-50)", border: "1px solid var(--border)", color: "var(--text)" }),
                       fontSize: "0.91rem",
                       lineHeight: 1.62,
-                      whiteSpace: "pre-wrap",
+                      ...(m.sender === "user" ? { whiteSpace: "pre-wrap" } : null),
                     }}
                   >
-                    {m.content}
+                    {m.sender === "user" ? m.content : <Markdown>{m.content}</Markdown>}
                   </div>
                 </div>
               ))}
