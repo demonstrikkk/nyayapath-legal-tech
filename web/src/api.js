@@ -5,6 +5,8 @@
 
 const BASE = import.meta.env.VITE_API_BASE || "/api";
 
+export const API_BASE = BASE;
+
 export class ApiError extends Error {
   constructor(message, { status, code, payload, timedOut } = {}) {
     super(message);
@@ -22,6 +24,51 @@ export class ApiError extends Error {
  */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * Workspace identity.
+ *
+ * The backend groups cases by the `x-user-id` header, and every case route
+ * checks that the header owns the case it is asked for. Without the header
+ * every browser shared one `litigant_demo` account and therefore one set of
+ * cases, so two people using the same instance saw each other's dossiers.
+ *
+ * The id is generated once per browser and kept in localStorage, so a reload
+ * keeps the same workspaces. This is workspace separation, not authentication:
+ * the header is still self-asserted, and anyone who can reach the API can
+ * claim another id. Real accounts need a server-issued session.
+ */
+const IDENTITY_KEY = "JollyLLM.userId";
+
+let memoryIdentity = "";
+
+function newIdentity() {
+  // randomUUID needs a secure context; plain http on a LAN address does not
+  // have one, and the app must still work there.
+  if (globalThis.crypto?.randomUUID) return `web_${crypto.randomUUID()}`;
+  const rand = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return `web_${Date.now().toString(36)}_${rand}`;
+}
+
+export function userIdentity() {
+  if (typeof localStorage !== "undefined") {
+    try {
+      const stored = localStorage.getItem(IDENTITY_KEY);
+      if (stored) return stored;
+      const fresh = newIdentity();
+      localStorage.setItem(IDENTITY_KEY, fresh);
+      return fresh;
+    } catch {
+      // Private mode or a blocked storage partition: fall through to memory.
+    }
+  }
+  if (!memoryIdentity) memoryIdentity = newIdentity();
+  return memoryIdentity;
+}
+
+function withIdentity(headers = {}) {
+  return { "x-user-id": userIdentity(), ...headers };
+}
+
 async function request(path, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
@@ -29,7 +76,11 @@ async function request(path, options = {}) {
 
   let res;
   try {
-    res = await fetch(`${BASE}${path}`, { ...options, signal: controller.signal });
+    res = await fetch(`${BASE}${path}`, {
+      ...options,
+      headers: withIdentity(options.headers),
+      signal: controller.signal,
+    });
   } catch (err) {
     clearTimeout(timer);
     if (err?.name === "AbortError") {
@@ -39,7 +90,7 @@ async function request(path, options = {}) {
       );
     }
     throw new ApiError(
-      "Could not reach the NyayaPath service. Check that the API is running on port 8787 and try again.",
+      "Could not reach the JollyLLM service. Check that the API is running on port 8787 and try again.",
       { code: "network" },
     );
   }
@@ -99,6 +150,10 @@ export const api = {
       body: JSON.stringify({ category }),
     }),
 
+  corpus: () => request("/corpus"),
+
+  edition: () => request("/edition"),
+
   provisions: (params = {}) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v !== undefined && v !== "" && v !== null),
@@ -108,8 +163,13 @@ export const api = {
 
   provision: (id) => request(`/provisions/${encodeURIComponent(id)}`),
 
-  judgments: (category) =>
-    request(`/judgments${category ? `?category=${encodeURIComponent(category)}` : ""}`),
+  judgments: (params = {}) => {
+    const values = typeof params === "string" ? { category: params } : params;
+    const qs = new URLSearchParams(
+      Object.entries(values).filter(([, v]) => v !== undefined && v !== "" && v !== null),
+    ).toString();
+    return request(`/judgments${qs ? `?${qs}` : ""}`);
+  },
 
   judgment: (id) => request(`/judgments/${encodeURIComponent(id)}`),
 
@@ -169,6 +229,77 @@ export const api = {
     });
   },
 
+  /**
+   * Store a document against the case. The file is kept on the server, linked
+   * to that case only, and its text is read for dates and facts. The caller
+   * cannot reach another case's documents: the server checks the case owner.
+   */
+  uploadCaseDocument: async (caseId, file, onProgress) => {
+    const form = new FormData();
+    form.append("file", file);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${BASE}/cases/${encodeURIComponent(caseId)}/documents`);
+      xhr.setRequestHeader("x-user-id", userIdentity());
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        let body = null;
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          body = null;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(body);
+        return reject(
+          new ApiError(
+            body?.detail || body?.error || "The document could not be stored.",
+            { status: xhr.status, code: body?.code || body?.error, payload: body },
+          ),
+        );
+      };
+      xhr.onerror = () =>
+        reject(new ApiError("The upload failed before it reached the service.", { code: "network" }));
+      xhr.ontimeout = () =>
+        reject(
+          new ApiError(
+            "The upload timed out. The document may be too large or the service may be busy.",
+            { code: "client_timeout", timedOut: true },
+          ),
+        );
+      xhr.timeout = 60000;
+      xhr.send(form);
+    });
+  },
+
+  listCaseDocuments: (caseId) =>
+    request(`/cases/${encodeURIComponent(caseId)}/documents`),
+
+  getCaseDocument: (caseId, docId) =>
+    request(`/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(docId)}`),
+
+  deleteCaseDocument: (caseId, docId) =>
+    request(`/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(docId)}`, {
+      method: "DELETE",
+    }),
+
+  /**
+   * Import a finished consultation transcript. The server stores each turn
+   * with the sender it actually had, and only client statements are treated
+   * as facts. Replaying the transcript through the live message endpoint
+   * would have turned the advocate's own questions into client allegations.
+   */
+  importTranscript: (caseId, messages) =>
+    request(`/cases/${encodeURIComponent(caseId)}/transcript`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages }),
+    }),
+
   // Case-scoped stateful workflows
   createCase: (payload) =>
     request("/cases", {
@@ -227,6 +358,20 @@ export const api = {
       body: JSON.stringify({ query }),
       timeoutMs: 30000,
     }),
+
+  listCaseAuthorities: (caseId) =>
+    request(`/cases/${encodeURIComponent(caseId)}/authorities`),
+
+  /** Search the live datagoblin legal dataset. The key stays on the server. */
+  searchLegalDataset: (query, limit = 20) =>
+    request("/legal/dataset/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit }),
+      timeoutMs: 30000,
+    }),
+
+  legalDatasetStatus: () => request("/legal/dataset/status"),
 
   correctFact: (caseId, factId, correctedStatement) =>
     request(`/cases/${encodeURIComponent(caseId)}/facts/${encodeURIComponent(factId)}/corrections`, {

@@ -5,10 +5,13 @@ import { Empty, Icon, Notice, Tag } from "../ui.jsx";
 const MAX_MB = 12;
 
 /**
- * PDF upload. Reports honestly when extraction is not possible: a scanned
- * document has no text layer, and we do not pretend otherwise.
+ * PDF upload for a case.
+ *
+ * When a case is given, the file is stored against that case: the server
+ * keeps the extracted text, links it to the case, and pulls dates and facts
+ * out of it. Without a case the file is only read, and the panel says so.
  */
-export default function PdfPanel({ onExtracted }) {
+export default function PdfPanel({ onExtracted, caseId = "", onStored }) {
   const inputRef = useRef(null);
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -49,9 +52,21 @@ export default function PdfPanel({ onExtracted }) {
     setBusy(true);
     setProgress(0);
     try {
-      const result = await api.extractPdf(file, setProgress);
+      const result = caseId
+        ? await api.uploadCaseDocument(caseId, file, setProgress)
+        : await api.extractPdf(file, setProgress);
+      if (caseId && result?.ok === false) {
+        setErr({
+          code: result.code,
+          title: result.title || "The document could not be read",
+          detail: result.detail || "The file was not stored.",
+          payload: result,
+        });
+        return;
+      }
       setDoc(result);
       onExtracted?.(result);
+      if (caseId) await onStored?.(result);
     } catch (e) {
       setErr({
         code: e.code || "failed",

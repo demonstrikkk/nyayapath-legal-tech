@@ -1,14 +1,14 @@
 {
-  "name": "nyayapath-server",
+  "name": "JollyLLM-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "NyayaPath backend API: case analysis, PDF extraction, legal-source retrieval, action plan generation",
+  "description": "JollyLLM backend API: case analysis, PDF extraction, legal-source retrieval, action plan generation",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test ../scripts/test_extract.mjs ../scripts/test_db.mjs ../scripts/test_intake.mjs ../scripts/test_case_api.mjs ../scripts/test_issue_detection.mjs ../scripts/test_lawyers.mjs"
+    "test": "node --test ../scripts/test_extract.mjs ../scripts/test_db.mjs ../scripts/test_intake.mjs ../scripts/test_case_api.mjs ../scripts/test_issue_detection.mjs ../scripts/test_legal_edition.mjs ../scripts/test_lawyers.mjs ../scripts/test_datagoblin.mjs ../scripts/test_llm_output.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -1,4 +1,4 @@
-# NyayaPath (न्यायपथ)
+# JollyLLM (न्यायपथ)
 ### AI-Driven Legal Advocate & Pro Se Strategy Engine
 
 > **"Know Your Rights in Ten Minutes"**  
@@ -35,13 +35,13 @@ Across India, millions of citizens encounter legal disputes, domestic harassment
 - **Flawed Generic AI Chatbots:** Standard LLM chatbots deliver generic legal definitions, hallucinate non-existent sections and deadlines, invent case law, and cannot safely correlate personal facts with judicial precedent.
 - **The July 1, 2024 Transition Confusion:** The replacement of the Indian Penal Code (IPC), Code of Criminal Procedure (CrPC), and Indian Evidence Act (IEA) with the Bharatiya Nyaya Sanhita (BNS), Bharatiya Nagarik Suraksha Sanhita (BNSS), and Bharatiya Sakshya Adhiniyam (BSA) created widespread confusion on which law applies based on incident timelines.
 
-**NyayaPath** resolves these obstacles by converting unstructured case narratives into an actionable, cross-statutory defense blueprint within **ten minutes**—strictly anchored to verified law and historical precedents without hallucination.
+**JollyLLM** resolves these obstacles by converting unstructured case narratives into an actionable, cross-statutory defense blueprint within **ten minutes**—strictly anchored to verified law and historical precedents without hallucination.
 
 ---
 
 ## 💡 Proposed Solution & Core Philosophy
 
-NyayaPath operates as an intelligent legal companion and *pro se* defense architect. It accepts narratives in **English, Hindi (Devanagari), or Hinglish (Romanised Hindi)** and uploaded evidentiary PDFs.
+JollyLLM operates as an intelligent legal companion and *pro se* defense architect. It accepts narratives in **English, Hindi (Devanagari), or Hinglish (Romanised Hindi)** and uploaded evidentiary PDFs.
 
 ```
  Case Narrative / PDF Upload
@@ -88,7 +88,7 @@ NyayaPath operates as an intelligent legal companion and *pro se* defense archit
 
 ## 🏛 System Architecture
 
-NyayaPath consists of three cohesive tiers communicating via high-speed, local protocols:
+JollyLLM consists of three cohesive tiers communicating via high-speed, local protocols:
 
 ```mermaid
 flowchart TB
@@ -193,7 +193,7 @@ sequenceDiagram
 
 Access to justice demands native language support:
 1. **Pure Hindi (Devanagari):** Analyzed with an n-gram window (unigram and adjacent word runs) normalized via Unicode NFKC.
-2. **Hinglish (Phonetic Romanised Hindi):** Litigants frequently express urgent crises using Roman characters for Hindi speech (e.g., *"pati ne mara aur ghar se nikal diya"*). NyayaPath features an embedded semantic mapping table converting phonetic terms:
+2. **Hinglish (Phonetic Romanised Hindi):** Litigants frequently express urgent crises using Roman characters for Hindi speech (e.g., *"pati ne mara aur ghar se nikal diya"*). JollyLLM features an embedded semantic mapping table converting phonetic terms:
    - `pati` / `poti` $\rightarrow$ पति (husband)
    - `saas` $\rightarrow$ सास (mother-in-law)
    - `peet` / `mara` $\rightarrow$ मारपीट (battery / physical violence)
@@ -206,7 +206,7 @@ Access to justice demands native language support:
 
 ## 🔍 Hybrid Retrieval & Precedent Search
 
-Legal vocabulary presents a dual challenge: exact statutory language requires keyword precision, while everyday vernacular requires conceptual semantic matching. NyayaPath implements **Hybrid Search**:
+Legal vocabulary presents a dual challenge: exact statutory language requires keyword precision, while everyday vernacular requires conceptual semantic matching. JollyLLM implements **Hybrid Search**:
 
 ### 1. Sparse Vector Space (TF-IDF)
 - Tokenizes legal provisions and case judgments.
@@ -227,7 +227,7 @@ $$\text{Score}_{\text{hybrid}} = \frac{w_{\text{sparse}} \cdot \widetilde{S}_{\t
 
 ## 🕸 Cross-Statute Interlinking Graph
 
-Self-represented citizens frequently do not know that one wrongful act triggers remedies across distinct legal codes. NyayaPath generates an **Interlinking Subgraph** that maps relations between provisions:
+Self-represented citizens frequently do not know that one wrongful act triggers remedies across distinct legal codes. JollyLLM generates an **Interlinking Subgraph** that maps relations between provisions:
 
 ```
         ┌────────────────────────────────┐
@@ -266,7 +266,7 @@ On **1 July 2024**, India enacted three new criminal enactments:
 - **Bharatiya Nagarik Suraksha Sanhita (BNSS), 2023** (replaced the Code of Criminal Procedure, 1973)
 - **Bharatiya Sakshya Adhiniyam (BSA), 2023** (replaced the Indian Evidence Act, 1872)
 
-Under Article 20(1) of the Constitution of India, substantive criminal law cannot apply retrospectively. NyayaPath includes a temporal reasoning rule:
+Under Article 20(1) of the Constitution of India, substantive criminal law cannot apply retrospectively. JollyLLM includes a temporal reasoning rule:
 1. **Incident dated strictly BEFORE 1 July 2024:** The system flags that substantive offenses occurred prior to the transition date, alerting the litigant that IPC/CrPC governs the substantive offenses, while displaying current sections with cross-reference guidance.
 2. **Incident dated ON or AFTER 1 July 2024:** Confirms that the Bharatiya Nyaya Sanhita (BNS) and BNSS apply directly.
 3. **Undated / Ambiguous Narratives:** Warns the user of the critical importance of fixing dates to determine statutory applicability.
@@ -288,7 +288,7 @@ Under Article 20(1) of the Constitution of India, substantive criminal law canno
 ## 📁 Repository Structure
 
 ```
-nyayapath-legal-tech/
+JollyLLM-legal-tech/
 ├── data/
 │   └── knowledge/                      # Curated, authoritative legal corpus
 │       ├── actionplans.json            # Step-by-step procedural roadmaps & deadlines
@@ -342,7 +342,7 @@ nyayapath-legal-tech/
 
 ## 📚 Curated Legal Knowledge Base
 
-NyayaPath is bundled with comprehensive coverage of Indian central legislation:
+JollyLLM is bundled with comprehensive coverage of Indian central legislation:
 
 ### Covered Acts & Enactments
 - **BNS, 2023:** Bharatiya Nyaya Sanhita (Offenses against women, property, body, computer-assisted offenses, criminal intimidation).
@@ -362,6 +362,15 @@ Includes foundational rulings with binding ratios and direct verification URLs t
 - *Shreya Singhal v. Union of India* (Intermediary liability and freedom of online expression)
 - *Vishaka v. State of Rajasthan* (Prevention of workplace sexual harassment)
 
+### Optional Imported Legal Edition
+
+The corpus can be extended additively with the `datagoblin_legal` edition without changing the six curated files:
+
+- **Snapshot:** `data/knowledge/legal_edition.json`. When it is absent the app runs on the curated corpus exactly as before.
+- **Sync:** `node scripts/sync_legal_edition.mjs --from <snapshot-path-or-URL>` (or set `LEGAL_EDITION_URL`).
+- **Merge rule:** a curated record always wins. Imported records fill blanks on overlap and add net-new provisions and judgments with `origin: "imported"`, a source URL, verification status, and quote-backed provenance.
+- **Browse:** the **Statutes** page shows merged provisions, judgments, an imported-edition tab, tier/origin filters, and CSV downloads.
+
 ---
 
 ## 🔌 API Reference
@@ -371,6 +380,12 @@ Includes foundational rulings with binding ratios and direct verification URLs t
   - Returns backend health, Python engine status (sparse vs dense readiness), LLM configuration, and corpus record counts.
 - **`GET /api/meta`**
   - Returns supported acts, categories, referral channels, disclaimers, and authoritative legal sources.
+- **`GET /api/corpus`**
+  - Returns merged, curated, imported, and raw-edition counts plus facet tallies for the corpus browser.
+- **`GET /api/edition`**
+  - Returns the raw synced `legal_edition.json` snapshot, or `404 edition_not_synced` when the optional edition is absent.
+- **`GET /api/corpus/export.csv?scope=merged|edition`**
+  - Downloads the merged corpus or the raw imported edition as CSV.
 - **`GET /api/samples`**
   - Returns seeded demo cases (e.g., Hinglish domestic violence, Hindi dowry dispute, English cyber fraud).
 
@@ -398,9 +413,17 @@ Includes foundational rulings with binding ratios and direct verification URLs t
 - **`POST /api/cases/:caseId/messages`**
   - Submits user response; handles non-blocking skips (`"I don't know"`, `"skip"`), detects factual contradictions, updates the case dossier, and returns the next adaptive question.
 - **`POST /api/cases/:caseId/documents`**
-  - Uploads evidentiary PDF; extracts text, dates, and facts, and attaches them with provenance to the case dossier.
+  - Uploads an evidentiary PDF or plain-text file; extracts text, dates, and facts, and attaches them with provenance to the case dossier. The file is stored against that case only.
 - **`GET /api/cases/:caseId/documents`**
   - Lists evidence documents linked to the case.
+- **`GET /api/cases/:caseId/documents/:docId`**
+  - Returns one document's stored text. The case is part of the lookup, so a document cannot be read from another workspace.
+- **`DELETE /api/cases/:caseId/documents/:docId`**
+  - Withdraws a document from the case and deletes its stored text.
+- **`POST /api/cases/:caseId/transcript`**
+  - Imports a finished consultation transcript. Each turn keeps the sender it actually had, and only the client's own statements become facts.
+- **`GET /api/cases/:caseId/authorities`**
+  - Lists the statutes and decisions this case relied on, each with the quote it rests on and where it came from.
 - **`POST /api/cases/:caseId/facts/:factId/corrections`**
   - Formally corrects an established fact, marks the old fact superseded, invalidates downstream stale plans, and increments the case version.
 - **`GET /api/cases/:caseId/action-plan`**
@@ -414,9 +437,13 @@ Includes foundational rulings with binding ratios and direct verification URLs t
 - **`GET /api/cases/:caseId/opponent-simulation`**
   - Retrieves the latest adversarial opponent simulation report.
 - **`POST /api/cases/:caseId/research`**
-  - Runs bounded dynamic legal research across India Code, Supreme Court rulings, and Indian Kanoon verification links for a specific case query.
+  - Runs bounded legal research for a specific case query over the bundled corpus, and over a live datagoblin dataset when one is configured. The authorities relied on are recorded against the case.
 - **`GET /api/cases/:caseId/research`**
   - Retrieves research run history and findings for the case.
+- **`POST /api/legal/dataset/search`**
+  - Searches a live datagoblin legal dataset by wording, over the stored page text. The dataset key stays on the server and only the search text is sent. Returns a clear "not configured" answer when no live dataset is set up.
+- **`GET /api/legal/dataset/status`**
+  - Reports whether a live datagoblin dataset is configured, without exposing the key.
 - **`POST /api/cases/:caseId/workflow`**
   - Executes the full typed, stateful Python LangGraph workflow directly via the stdio IPC channel.
 
@@ -428,9 +455,9 @@ Includes foundational rulings with binding ratios and direct verification URLs t
 - **`POST /api/pdf/extract`**
   - Standalone PDF text and timeline extraction.
 - **`GET /api/provisions`** & **`GET /api/provisions/:id`**
-  - Query provisions by category, act, or search keyword.
+  - Query provisions by `q`, `category`, `act`, `tier`, `state`, or `origin`, with `limit`/`offset` pagination.
 - **`GET /api/judgments`** & **`GET /api/judgments/:id`**
-  - Query precedent database and access Indian Kanoon search verification URLs.
+  - Query the precedent database with the same filters, and access Indian Kanoon search verification URLs.
 - **`GET /api/graph?provisions=DVA-12,BNS-85`**
   - Returns the cross-statute relational subgraph for the requested provision identifiers.
 - **`GET /api/forms?category=domestic-violence`**
@@ -527,13 +554,13 @@ Runs all unit, regression, database, conversational intake, and end-to-end integ
 - `test_extract.mjs` (17 tests): ISO 8601 parsing, DD-MM-YYYY Indian date conventions, Hindi date expressions, bare year handling, language script detection.
 - `test_db.mjs` (4 tests): User & case creation, conversation persistence, fact provenance, fact corrections with downstream plan invalidation, opponent simulation storage.
 - `test_intake.mjs` (3 tests): Multilingual intake classification (English, Hindi, Hinglish), adaptive questioning, non-blocking skips (`"I don't know"`), contradiction detection.
-- `test_case_api.mjs` (7 tests): Full REST API integration covering case creation, messages, legal analysis, Courtroom Opponent Simulation Agent, Dynamic Legal Research Agent, fact corrections, and LangGraph workflow invocation.
+- `test_case_api.mjs` (8 tests): Full REST API integration covering case creation, messages, legal analysis, Courtroom Opponent Simulation Agent, Dynamic Legal Research Agent, fact corrections, corpus/count/filter/CSV endpoints, and LangGraph workflow invocation.
 
 ```bash
 cd server
 npm test
 ```
-*Actual output: `tests 31 · pass 31 · fail 0`*
+*Actual output: `tests 56 · pass 56 · fail 0`*
 
 ### 2. Retrieval Engine Smoke Tests (Python)
 Validates stdio protocol communication, sparse TF-IDF scoring, Hindi and English keyword categorisation, and judgment retrieval:
@@ -554,10 +581,10 @@ python retrieval/workflow.py
 ## 🕊 Ethical Considerations, SDGs & Disclaimers
 
 ### Non-Lawyer Disclaimer
-NyayaPath is an **information and strategy engine**, not a licensed attorney. It does not provide legal representation, nor does using it establish an attorney-client relationship. All strategies, forms, and timelines are intended to empower self-represented citizens to understand their options and prepare their documents. Litigants facing criminal prosecution or complex civil litigation are urged to seek qualified counsel or visit their local Legal Services Authority (DLSA).
+JollyLLM is an **information and strategy engine**, not a licensed attorney. It does not provide legal representation, nor does using it establish an attorney-client relationship. All strategies, forms, and timelines are intended to empower self-represented citizens to understand their options and prepare their documents. Litigants facing criminal prosecution or complex civil litigation are urged to seek qualified counsel or visit their local Legal Services Authority (DLSA).
 
 ### Sustainable Development Goals (SDG) Alignment
-NyayaPath directly advances the United Nations Sustainable Development Goals:
+JollyLLM directly advances the United Nations Sustainable Development Goals:
 - **SDG 16 (Peace, Justice, and Strong Institutions):** Provides equal access to justice and legal empowerment for self-represented citizens.
 - **SDG 5 (Gender Equality):** Provides protective pathways and procedural roadmaps for survivors of domestic violence, workplace harassment, and dowry abuse.
 - **SDG 10 (Reduced Inequalities):** Lowers the financial and linguistic barriers to navigating the justice system.

@@ -106,7 +106,7 @@ def check_adversarial_guardrail(text: str) -> Optional[str]:
                 "⚖️ **Statutory Prohibition:**\n"
                 "- Fabricating evidence, forging receipts, manufacturing signatures, or presenting false affidavits constitutes serious criminal offences under **Bharatiya Nyaya Sanhita, 2023 (Section 227 - Fabricating false evidence; Section 336 - Forgery; Section 340 - Using forged document as genuine)** and former IPC Sections 192, 193, 465, and 471.\n"
                 "- Presenting fabricated records before any judicial forum or Consumer Commission invites summary dismissal of proceedings, immediate prosecution for perjury under **Section 379 BNSS**, and heavy exemplary costs.\n\n"
-                "NyayaPath Legal Enclave strictly facilitates lawful rights protection, genuine evidence gathering, and legitimate litigation readiness. Please share only truthful, contemporaneous facts and lawful claims."
+                "JollyLLM Legal Enclave strictly facilitates lawful rights protection, genuine evidence gathering, and legitimate litigation readiness. Please share only truthful, contemporaneous facts and lawful claims."
             )
     return None
 
@@ -380,7 +380,7 @@ def synthesize_fallback_opinion(latest_text: str, category: str, rag_context: Di
 # ---------------------------------------------------------------------------
 STATUTORY_DISCLAIMER_FOOTER = (
     "\n\n---\n"
-    "⚖️ *NyayaPath Procedural Integrity Notice (Advocates Act, 1961 & BCI Rules):* "
+    "⚖️ *JollyLLM Procedural Integrity Notice (Advocates Act, 1961 & BCI Rules):* "
     "This guidance is provided for pro se case preparation and statutory rights analysis. "
     "It does not create a formal advocate-client vakalatnama relationship. "
     "Pleadings should be finalized with an enrolled advocate or District Legal Services Authority (DLSA) panel counsel before judicial submission."

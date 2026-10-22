@@ -1,5 +1,5 @@
 /**
- * Strict Test Suite for NyayaPath Legal AI Chatbot & Multi-Tier Guardrails
+ * Strict Test Suite for JollyLLM Legal AI Chatbot & Multi-Tier Guardrails
  */
 
 const API_BASE = "http://localhost:8787/api";
@@ -18,7 +18,7 @@ async function postChat(messages, newText, category = "auto") {
 
 async function runTests() {
   console.log("==========================================================");
-  console.log("   NYAYAPATH CHATBOT & MULTI-TIER GUARDRAIL STRICT TESTS   ");
+  console.log("   JollyLLM CHATBOT & MULTI-TIER GUARDRAIL STRICT TESTS   ");
   console.log("==========================================================\n");
 
   let passed = 0;

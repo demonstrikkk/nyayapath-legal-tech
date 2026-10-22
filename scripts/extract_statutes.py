@@ -2,7 +2,7 @@ import os, sys
 from pypdf import PdfReader
 
 TEMP = os.environ["TEMP"]
-out_dir = os.path.join(TEMP, "nyayapath_statutes")
+out_dir = os.path.join(TEMP, "JollyLLM_statutes")
 os.makedirs(out_dir, exist_ok=True)
 
 for name in sys.argv[1:]:

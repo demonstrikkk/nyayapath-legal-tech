@@ -71,10 +71,13 @@ export async function classifyIntake(text) {
   // If LLM is enabled and configured, we can use fast model for high-precision validation
   if (llm.isEnabled() && (!scored.length || scored[0].score <= 1)) {
     try {
-      const completion = await llm.chatCompletion({
-        model: process.env.FAST_LLM_MODEL || "openai/gpt-oss-20b",
+      const completion = await llm.chatCompletionWithFallback({
+        // The configured model, unless the operator pins a faster one for
+        // this step. A hardcoded id here used to send the app to a different
+        // model than the one it was configured with.
+        model: process.env.FAST_LLM_MODEL || llm.configuredModel(),
         temperature: 0.1,
-        maxTokens: 120,
+        maxTokens: 300,
         messages: [
           {
             role: "system",

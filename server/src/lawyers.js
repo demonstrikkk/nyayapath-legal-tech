@@ -206,7 +206,7 @@ function blankContactFields(record) {
     barCouncil: null,
     enrolmentNumber: null,
     verificationStatus: "demo",
-    profileSource: "NyayaPath demo directory (fictional)",
+    profileSource: "JollyLLM demo directory (fictional)",
     contactDetails: null,
     bookingUrl: null,
     availabilityStatus: null,

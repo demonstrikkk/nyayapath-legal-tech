@@ -106,8 +106,9 @@ export default function WorkspacesDirectory({
               Active Case Workspaces
             </h1>
             <p style={{ maxWidth: "68ch", color: "var(--text-soft)", margin: "4px 0 0", fontSize: "0.86rem", lineHeight: 1.55 }}>
-              Each workspace functions as an isolated legal enclave maintaining independent factual depositions,
-              BSA Section 63 evidentiary provenance, and trial opponent simulations.
+              Each workspace keeps its own factual record, the documents filed against it, its chat
+              history, and its opponent simulations. Nothing filed in one workspace is visible from
+              another.
             </p>
           </div>
 

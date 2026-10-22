@@ -1,6 +1,6 @@
 import re, sys, os
 
-base = os.path.join(os.environ["TEMP"], "nyayapath_statutes")
+base = os.path.join(os.environ["TEMP"], "JollyLLM_statutes")
 
 
 def load(name):

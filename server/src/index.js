@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import multer from "multer";
@@ -38,11 +39,13 @@ import {
   actionPlanRepo,
   auditRepo,
   documentsRepo,
+  authoritiesRepo,
 } from "./db.js";
 import { classifyIntake, processUserTurn, getNextIntakeStep } from "./intakeAgent.js";
 import { runOpponentSimulation } from "./opponentAgent.js";
 import { runLegalResearch } from "./researchAgent.js";
 import { generateActionPlan } from "./actionAgent.js";
+import * as datagoblinClient from "./datagoblinClient.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const app = express();
@@ -113,11 +116,20 @@ app.get("/api/health", async (_req, res) => {
   // `configured` only means a key is present. `liveReady` additionally requires
   // that the provider answered AND actually serves the configured model. Only
   // liveReady may ever be reported as mode "ai".
-  const liveReady = Boolean(llmInfo.enabled && provider.reachable && provider.modelAvailable !== false);
+  //
+  // A provider can be reachable, serve the model, and still be unusable - a
+  // spent daily quota does not change the model list. So the last real
+  // request decides: if it was rate limited and the limit has not cleared,
+  // the honest answer is deterministic, not "ai".
+  const outcome = llmInfo.lastOutcome || { failed: false, usable: true, failure: null };
+  const quotaBlocked = outcome.failed && outcome.usable === false;
+  const liveReady = Boolean(
+    llmInfo.enabled && provider.reachable && provider.modelAvailable !== false && !quotaBlocked,
+  );
 
   res.json({
     ok: true,
-    service: "nyayapath-api",
+    service: "JollyLLM-api",
     version: "1.1.1",
     engine,
     llm: {
@@ -129,6 +141,8 @@ app.get("/api/health", async (_req, res) => {
       providerReachable: provider.reachable,
       modelAvailable: provider.modelAvailable ?? null,
       providerCheck: provider,
+      // Why the model is not being used, in the provider's own words.
+      blockedReason: quotaBlocked ? outcome.failure : null,
     },
     corpus: {
       provisions: kb.provisions().length,
@@ -155,6 +169,7 @@ app.get("/api/meta", (_req, res) => {
     disclaimer: kb.disclaimer(),
     provisionsMeta: kb.provisions_doc().meta,
     judgmentsMeta: kb.judgments_doc().meta,
+    edition: kb.edition_meta(),
     llm: llm.describe(),
     sources: [
       { name: "India Code", url: "https://www.indiacode.nic.in/", note: "Official consolidated text of central statutes." },
@@ -263,19 +278,82 @@ function getAuthUser(req) {
   return userId;
 }
 
+/**
+ * Store a consultation transcript against a case.
+ *
+ * Each turn keeps the sender it actually had. Only the client's own
+ * statements become facts: replaying the transcript through the live message
+ * endpoint would have turned the advocate's questions into client
+ * allegations, and re-ran the model once per turn.
+ *
+ * Returns the stored messages.
+ */
+function importTranscript(caseObj, turns) {
+  const imported = [];
+
+  for (const turn of turns) {
+    const content = String(turn?.text ?? turn?.content ?? "").trim();
+    if (!content) continue;
+
+    const raw = String(turn?.sender || "").toLowerCase();
+    // A document notice is a note about an attachment, not something the
+    // client said, so it is filed as one and never becomes a fact.
+    const sender =
+      raw === "assistant" || raw === "advocate"
+        ? "assistant"
+        : raw === "document"
+          ? "document"
+          : "user";
+
+    const message = messagesRepo.add({
+      conversationId: caseObj.conversationId,
+      caseId: caseObj.id,
+      sender,
+      content,
+      stepTag: sender === "document" ? "document_notice" : "intake_transcript",
+    });
+    imported.push(message);
+
+    if (sender === "user") {
+      const result = processUserTurn(caseObj.id, content);
+      auditRepo.log(caseObj.id, "transcript_fact", "user", {
+        messageId: message.id,
+        type: result?.type || "statement",
+      });
+    }
+  }
+
+  auditRepo.log(caseObj.id, "transcript_imported", "user", { turns: imported.length });
+  return imported;
+}
+
 /** 1. Create a case & initiate conversational intake */
 app.post("/api/cases", async (req, res, next) => {
   try {
     const userId = getAuthUser(req);
-    const { title, narrative, category, jurisdiction, language } = req.body || {};
+    const { title, narrative, category, jurisdiction, language, transcript } = req.body || {};
 
-    const initialTitle = (title || "").trim() || (narrative ? narrative.slice(0, 60) + "..." : "New Legal Matter");
+    // A finished consultation arrives as its turns. The client's own words are
+    // then the case's words, so they are what gets classified.
+    const turns = Array.isArray(transcript) ? transcript : [];
+    const clientText = turns
+      .filter((t) => {
+        const s = String(t?.sender || "").toLowerCase();
+        return s !== "assistant" && s !== "advocate" && s !== "document";
+      })
+      .map((t) => String(t?.text ?? t?.content ?? "").trim())
+      .filter(Boolean)
+      .join(". ");
+
+    const initialTitle =
+      (title || "").trim() || (narrative || clientText ? (narrative || clientText).slice(0, 60) + "..." : "New Legal Matter");
     let initialCategory = category || null;
 
-    // If category not given but narrative is present, run fast classification
+    // If category not given but a narrative is present, run fast classification
     let classification = null;
-    if (narrative && narrative.trim().length >= 10) {
-      classification = await classifyIntake(narrative);
+    const classificationText = (narrative || "").trim() || clientText;
+    if (classificationText.length >= 10) {
+      classification = await classifyIntake(classificationText);
       if (!initialCategory && classification?.primaryCategory) {
         initialCategory = classification.primaryCategory;
       }
@@ -289,28 +367,36 @@ app.post("/api/cases", async (req, res, next) => {
       language: language || (classification?.language?.code) || "en",
     });
 
-    // If initial narrative provided, store it and extract initial turn
-    if (narrative && narrative.trim().length >= 10) {
-      messagesRepo.add({
-        conversationId: newCase.conversationId,
-        caseId: newCase.id,
-        sender: "user",
-        content: narrative.trim(),
-      });
-      processUserTurn(newCase.id, narrative.trim());
-    }
+    let nextStep = null;
 
-    const nextStep = await getNextIntakeStep(newCase.id);
+    if (turns.length) {
+      // The transcript already holds the advocate's turns, so the case does
+      // not need an extra opening question.
+      importTranscript(newCase, turns);
+    } else {
+      // If initial narrative provided, store it and extract initial turn
+      if (narrative && narrative.trim().length >= 10) {
+        messagesRepo.add({
+          conversationId: newCase.conversationId,
+          caseId: newCase.id,
+          sender: "user",
+          content: narrative.trim(),
+        });
+        processUserTurn(newCase.id, narrative.trim());
+      }
 
-    // Save assistant's opening/follow-up question
-    if (nextStep?.question) {
-      messagesRepo.add({
-        conversationId: newCase.conversationId,
-        caseId: newCase.id,
-        sender: "assistant",
-        content: nextStep.question,
-        stepTag: nextStep.status,
-      });
+      nextStep = await getNextIntakeStep(newCase.id);
+
+      // Save assistant's opening/follow-up question
+      if (nextStep?.question) {
+        messagesRepo.add({
+          conversationId: newCase.conversationId,
+          caseId: newCase.id,
+          sender: "assistant",
+          content: nextStep.question,
+          stepTag: nextStep.status,
+        });
+      }
     }
 
     return res.status(201).json({
@@ -318,6 +404,8 @@ app.post("/api/cases", async (req, res, next) => {
       case: casesRepo.get(newCase.id, userId),
       classification,
       nextIntakeStep: nextStep,
+      activeFacts: factsRepo.list(newCase.id),
+      timeline: timelineRepo.list(newCase.id),
     });
   } catch (err) {
     next(err);
@@ -519,22 +607,47 @@ app.post("/api/cases/:caseId/documents", upload.single("file"), async (req, res,
     if (!caseObj) return res.status(404).json({ error: "case_not_found" });
 
     if (!req.file) {
-      return res.status(400).json({ error: "file_required", detail: "Please attach a PDF document." });
+      return res.status(400).json({ error: "file_required", detail: "Please attach a document." });
     }
 
-    const parsed = await pdf.extractPdf(req.file.buffer, req.file.originalname);
-    if (!parsed.ok) {
-      return res.status(parsed.code === "not_a_pdf" ? 415 : 422).json(parsed);
+    // A PDF is parsed for its text layer. A plain-text file is its own text,
+    // so it is stored as it reads. Anything else is refused rather than
+    // stored unreadable.
+    const isText =
+      /^text\//i.test(req.file.mimetype || "") ||
+      /\.(txt|md|csv|json|log)$/i.test(req.file.originalname || "");
+
+    let parsed;
+    if (isText) {
+      const text = req.file.buffer.toString("utf8").replace(/\u0000/g, "").trim();
+      if (!text) {
+        return res.status(422).json({
+          ok: false,
+          code: "empty_text",
+          title: "That file has no readable text",
+          detail: "The file was read but contained nothing. Save it as PDF or plain text and try again.",
+        });
+      }
+      parsed = { ok: true, text, pages: 1 };
+    } else {
+      parsed = await pdf.extractPdf(req.file.buffer, req.file.originalname);
+      if (!parsed.ok) {
+        return res.status(parsed.code === "not_a_pdf" ? 415 : 422).json(parsed);
+      }
     }
 
     // Save document record
     const doc = documentsRepo.add({
       caseId: caseObj.id,
       filename: req.file.originalname,
-      mimeType: req.file.mimetype,
+      mimeType: req.file.mimetype || "application/octet-stream",
       sizeBytes: req.file.size,
       extractedText: parsed.text,
       pageCount: parsed.pages || 1,
+      metadata: {
+        sha256: createHash("sha256").update(req.file.buffer).digest("hex"),
+        kind: isText ? "text" : "pdf",
+      },
     });
 
     // Extract dates & facts from uploaded document
@@ -558,9 +671,12 @@ app.post("/api/cases/:caseId/documents", upload.single("file"), async (req, res,
     // Extract facts from document
     const extractedCues = extractFacts(parsed.text, kb.categories().flatMap((c) => c.keywords || []), { limit: 5 });
     for (const f of extractedCues.facts) {
+      // extractFacts returns { text, relevance, why }, not { fact }.
+      const statement = String(f?.text ?? "").trim();
+      if (!statement) continue;
       factsRepo.add({
         caseId: caseObj.id,
-        statement: f.fact,
+        statement,
         sourceType: "document",
         sourceRef: doc.id,
         verificationStatus: "corroborated",
@@ -588,6 +704,57 @@ app.get("/api/cases/:caseId/documents", (req, res) => {
 
   const docs = documentsRepo.list(caseObj.id);
   res.json({ total: docs.length, documents: docs });
+});
+
+/** 7b. Read one document's stored text */
+app.get("/api/cases/:caseId/documents/:docId", (req, res) => {
+  const userId = getAuthUser(req);
+  const caseObj = casesRepo.get(req.params.caseId, userId);
+  if (!caseObj) return res.status(404).json({ error: "case_not_found" });
+
+  // The case is in the lookup, so one case can never read another's document.
+  const doc = documentsRepo.get(req.params.docId, caseObj.id);
+  if (!doc) return res.status(404).json({ error: "document_not_found" });
+
+  res.json({ ok: true, document: doc });
+});
+
+/** 7c. Delete a document from a case */
+app.delete("/api/cases/:caseId/documents/:docId", (req, res) => {
+  const userId = getAuthUser(req);
+  const caseObj = casesRepo.get(req.params.caseId, userId);
+  if (!caseObj) return res.status(404).json({ error: "case_not_found" });
+
+  const removed = documentsRepo.remove(req.params.docId, caseObj.id);
+  if (!removed) return res.status(404).json({ error: "document_not_found" });
+
+  res.json({ ok: true, deleted: true, documentId: req.params.docId });
+});
+
+/** 7d. Import a consultation transcript into an existing case.
+ *
+ * The intake interview runs before the case exists, so its turns are usually
+ * posted with the case itself. This endpoint exists for a transcript that
+ * arrives after the case was created.
+ */
+app.post("/api/cases/:caseId/transcript", (req, res) => {
+  const userId = getAuthUser(req);
+  const caseObj = casesRepo.get(req.params.caseId, userId);
+  if (!caseObj) return res.status(404).json({ error: "case_not_found" });
+
+  const turns = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  if (!turns.length) return res.status(400).json({ error: "messages_required" });
+  if (turns.length > 500) return res.status(413).json({ error: "transcript_too_long" });
+
+  const imported = importTranscript(caseObj, turns);
+
+  res.status(201).json({
+    ok: true,
+    imported: imported.length,
+    messages: imported,
+    activeFacts: factsRepo.list(caseObj.id),
+    timeline: timelineRepo.list(caseObj.id),
+  });
 });
 
 /** 8. Run full legal analysis on established case facts */
@@ -680,6 +847,51 @@ app.get("/api/cases/:caseId/research", (req, res) => {
   res.json({ total: runs.length, researchRuns: runs });
 });
 
+/** 12b. The authorities this case relied on */
+app.get("/api/cases/:caseId/authorities", (req, res) => {
+  const userId = getAuthUser(req);
+  const caseObj = casesRepo.get(req.params.caseId, userId);
+  if (!caseObj) return res.status(404).json({ error: "case_not_found" });
+
+  res.json({ total: authoritiesRepo.list(caseObj.id).length, authorities: authoritiesRepo.list(caseObj.id) });
+});
+
+/** 12c. Search the live datagoblin legal dataset.
+ *
+ * The legal question is the only thing that leaves this process. The key
+ * stays on the server. When datagoblin is not configured the endpoint says
+ * so rather than pretending the bundled corpus is live data.
+ */
+app.post("/api/legal/dataset/search", async (req, res, next) => {
+  try {
+    const query = String(req.body?.query || "").trim();
+    if (!query) return res.status(400).json({ error: "query_required" });
+    if (query.length > 500) return res.status(413).json({ error: "query_too_long" });
+
+    if (!datagoblinClient.isConfigured()) {
+      return res.json({
+        ok: true,
+        configured: false,
+        source: "bundled-corpus",
+        detail:
+          "No live datagoblin dataset is configured, so this search ran against the bundled corpus only.",
+      });
+    }
+
+    const result = await datagoblinClient.searchRecords(query, {
+      limit: Number(req.body?.limit) || 20,
+    });
+    res.json({ ok: true, configured: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** 12d. Is a live datagoblin dataset available? */
+app.get("/api/legal/dataset/status", (_req, res) => {
+  res.json({ ok: true, ...datagoblinClient.describe() });
+});
+
 /** 13. Correct a fact & invalidate downstream plans */
 app.post("/api/cases/:caseId/facts/:factId/corrections", (req, res) => {
   const userId = getAuthUser(req);
@@ -729,7 +941,7 @@ app.post("/api/cases/:caseId/action-plan/items/:itemId/toggle", (req, res) => {
   if (!caseObj) return res.status(404).json({ error: "case_not_found" });
 
   const isCompleted = Boolean(req.body?.isCompleted);
-  actionPlanRepo.toggleItem(req.params.itemId, isCompleted);
+  actionPlanRepo.toggleItem(caseObj.id, req.params.itemId, isCompleted);
   res.json({ ok: true, itemId: req.params.itemId, isCompleted });
 });
 
@@ -764,26 +976,213 @@ app.post("/api/cases/:caseId/workflow", async (req, res, next) => {
 // Legal source lookup
 // ---------------------------------------------------------------------------
 
-app.get("/api/provisions", (req, res) => {
-  const { category, act, q } = req.query;
-  let list = kb.provisions();
-  if (category) list = list.filter((p) => p.category === category);
-  if (act) list = list.filter((p) => p.act === act);
+const CORPUS_ORIGINS = new Set(["curated", "imported"]);
+
+function queryText(req, name) {
+  const value = req.query[name];
+  return value === undefined ? "" : String(value).trim();
+}
+
+function recordOrigin(record) {
+  const origin = String(record.origin || "");
+  if (CORPUS_ORIGINS.has(origin)) return origin;
+  return record.provenance ? "imported" : "curated";
+}
+
+function searchable(record) {
+  const provenance = record.provenance || {};
+  return [
+    record.id, record.act, record.section, record.heading, record.title,
+    record.summary, record.whyItMatters, record.citation, record.court,
+    record.factsPattern, record.holding, record.ratio,
+    ...(record.keywords || []), ...(record.signalTerms || []),
+    record.category, ...(record.categories || []),
+    ...Object.values(provenance.quotes || {}),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function matchesCorpusFilters(record, filters, kind) {
+  const { q, category, act, tier, state, origin } = filters;
   if (q) {
-    const needle = String(q).toLowerCase();
-    list = list.filter((p) =>
-      [p.heading, p.summary, p.whyItMatters, ...(p.keywords || [])]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle),
-    );
+    const haystack = searchable(record);
+    if (!q.toLowerCase().split(/\s+/).every((token) => haystack.includes(token))) {
+      return false;
+    }
   }
+  if (category) {
+    const categories = kind === "judgment"
+      ? record.categories || []
+      : record.category ? [record.category] : [];
+    if (!categories.includes(category)) return false;
+  }
+  if (act && record.act !== act) return false;
+  if (tier && String(record.tier || "").toLowerCase() !== tier.toLowerCase()) return false;
+  if (state && String(record.state || "").toLowerCase() !== state.toLowerCase()) return false;
+  if (origin && recordOrigin(record) !== origin) return false;
+  return true;
+}
+
+function corpusFilters(req) {
+  return {
+    q: queryText(req, "q"),
+    category: queryText(req, "category"),
+    act: queryText(req, "act"),
+    tier: queryText(req, "tier"),
+    state: queryText(req, "state"),
+    origin: queryText(req, "origin"),
+  };
+}
+
+function tally(items, valueOf) {
+  const counts = {};
+  for (const item of items) {
+    const value = valueOf(item);
+    if (value) counts[value] = (counts[value] || 0) + 1;
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
+
+function corpusFacets(provisions, judgments) {
+  const all = [...provisions, ...judgments];
+  return {
+    acts: tally(provisions, (r) => r.act),
+    tiers: tally(all, (r) => r.tier),
+    states: tally(all, (r) => r.state),
+    origins: tally(all, (r) => recordOrigin(r)),
+    categories: tally(all, (r) => r.category || (r.categories || [])[0]),
+  };
+}
+
+function paginate(list, req) {
+  const total = list.length;
+  const offset = Math.max(0, Number.parseInt(queryText(req, "offset"), 10) || 0);
+  const requested = Number.parseInt(queryText(req, "limit"), 10);
+  const limit = Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, 2000)
+    : total;
+  return { total, offset, limit, rows: list.slice(offset, offset + limit) };
+}
+
+app.get("/api/corpus", (_req, res) => {
+  const provisions = kb.provisions();
+  const judgments = kb.judgments();
+  const importedProvisions = provisions.filter((r) => recordOrigin(r) === "imported");
+  const importedJudgments = judgments.filter((r) => recordOrigin(r) === "imported");
+  const curatedProvisions = provisions.filter((r) => recordOrigin(r) === "curated");
+  const curatedJudgments = judgments.filter((r) => recordOrigin(r) === "curated");
+  const edition = kb.edition_doc();
+  res.json({
+    edition: kb.edition_meta(),
+    counts: {
+      merged: {
+        provisions: provisions.length,
+        judgments: judgments.length,
+        total: provisions.length + judgments.length,
+      },
+      curated: {
+        provisions: curatedProvisions.length,
+        judgments: curatedJudgments.length,
+        total: curatedProvisions.length + curatedJudgments.length,
+      },
+      imported: {
+        provisions: importedProvisions.length,
+        judgments: importedJudgments.length,
+        total: importedProvisions.length + importedJudgments.length,
+      },
+      edition: edition?.counts || null,
+    },
+    facets: corpusFacets(provisions, judgments),
+  });
+});
+
+app.get("/api/edition", (_req, res) => {
+  const doc = kb.edition_doc();
+  if (!doc) {
+    return res.status(404).json({
+      error: "edition_not_synced",
+      detail: "No legal_edition.json has been synced into data/knowledge.",
+    });
+  }
+  const mark = (record) => ({ ...record, origin: "imported" });
+  res.json({
+    ...doc,
+    provisions: (doc.provisions || []).map(mark),
+    judgments: (doc.judgments || []).map(mark),
+  });
+});
+
+const CSV_COLUMNS = [
+  "record_kind", "id", "act", "section", "title", "citation", "court",
+  "year", "tier", "state", "origin", "summary", "source_url",
+  "verification", "retrieved_at", "content_hash",
+];
+
+function csvCell(value) {
+  const text = value === undefined || value === null ? "" : String(value);
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+app.get("/api/corpus/export.csv", (req, res) => {
+  const scope = req.query.scope === "edition" ? "edition" : "merged";
+  const doc = kb.edition_doc();
+  const provisions = scope === "edition" ? doc?.provisions || [] : kb.provisions();
+  const judgments = scope === "edition" ? doc?.judgments || [] : kb.judgments();
+  const rows = [
+    ...provisions.map((record) => ({ record, kind: "provision" })),
+    ...judgments.map((record) => ({ record, kind: "judgment" })),
+  ].map(({ record, kind }) => ({
+    record_kind: kind,
+    id: record.id,
+    act: record.act,
+    section: record.section,
+    title: record.heading || record.title,
+    citation: record.citation,
+    court: record.court,
+    year: record.year,
+    tier: record.tier,
+    state: record.state,
+    origin: scope === "edition" ? "imported" : recordOrigin(record),
+    summary: record.summary || record.factsPattern,
+    source_url: record.sourceUrl || record.provenance?.source_url,
+    verification: record.provenance?.verification || record.verification,
+    retrieved_at: record.provenance?.retrieved_at,
+    content_hash: record.provenance?.content_hash,
+  }));
+  const csv = [
+    CSV_COLUMNS.join(","),
+    ...rows.map((row) => CSV_COLUMNS.map((column) => csvCell(row[column])).join(",")),
+  ].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="JollyLLM-${scope}-corpus.csv"`,
+  );
+  res.send(`${csv}\n`);
+});
+
+app.get("/api/provisions", (req, res) => {
+  const filters = corpusFilters(req);
+  const all = kb.provisions();
+  const matched = all.filter((p) => matchesCorpusFilters(p, filters, "provision"));
+  const page = paginate(matched, req);
   const acts = kb.acts();
   res.json({
-    total: list.length,
-    provisions: list.map((p) => {
+    total: page.total,
+    offset: page.offset,
+    limit: page.limit,
+    facets: corpusFacets(kb.provisions(), kb.judgments()),
+    provisions: page.rows.map((p) => {
       const a = acts[p.act] || {};
-      return { ...p, actShortTitle: a.shortTitle, sourceUrl: a.sourceUrl };
+      return {
+        ...p,
+        origin: recordOrigin(p),
+        actShortTitle: p.actShortTitle || a.shortTitle || p.act,
+        sourceUrl: p.sourceUrl || a.sourceUrl || p.provenance?.source_url || "",
+        sourceLabel: p.sourceLabel || a.sourceLabel || "Official text",
+      };
     }),
   });
 });
@@ -794,14 +1193,32 @@ app.get("/api/provisions/:id", async (req, res) => {
   const rec = kb.provision_by_id(req.params.id);
   if (!rec) return res.status(404).json({ error: "provision_not_found" });
   const a = kb.acts()[rec.act] || {};
-  res.json({ ...rec, actShortTitle: a.shortTitle, sourceUrl: a.sourceUrl });
+  res.json({
+    ...rec,
+    origin: recordOrigin(rec),
+    actShortTitle: a.shortTitle,
+    sourceUrl: rec.sourceUrl || a.sourceUrl,
+  });
 });
 
 app.get("/api/judgments", (req, res) => {
-  const { category } = req.query;
-  let list = kb.judgments();
-  if (category) list = list.filter((j) => (j.categories || []).includes(category));
-  res.json({ total: list.length, judgments: list });
+  const filters = corpusFilters(req);
+  const matched = kb.judgments().filter(
+    (j) => matchesCorpusFilters(j, filters, "judgment"),
+  );
+  const page = paginate(matched, req);
+  res.json({
+    total: page.total,
+    offset: page.offset,
+    limit: page.limit,
+    facets: corpusFacets(kb.provisions(), kb.judgments()),
+    judgments: page.rows.map((j) => ({
+      ...j,
+      origin: recordOrigin(j),
+      sourceUrl: j.sourceUrl || j.provenance?.source_url || "",
+      verifyUrl: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(j.citation)}`,
+    })),
+  });
 });
 
 app.get("/api/judgments/:id", (req, res) => {
@@ -809,6 +1226,8 @@ app.get("/api/judgments/:id", (req, res) => {
   if (!rec) return res.status(404).json({ error: "judgment_not_found" });
   res.json({
     ...rec,
+    origin: recordOrigin(rec),
+    sourceUrl: rec.sourceUrl || rec.provenance?.source_url || "",
     verifyUrl: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(rec.citation)}`,
   });
 });
@@ -986,7 +1405,7 @@ app.use((err, req, res, _next) => {
   return res.status(500).json({
     error: "internal_error",
     detail:
-      "The request could not be completed. This is a bug in the NyayaPath prototype, not a problem with your case.",
+      "The request could not be completed. This is a bug in the JollyLLM prototype, not a problem with your case.",
     hint: "Retry. If it keeps failing, restart the API service.",
   });
 });
@@ -996,7 +1415,7 @@ app.use((err, req, res, _next) => {
 // ---------------------------------------------------------------------------
 
 const server = app.listen(PORT, () => {
-  console.log(`\n  NyayaPath API listening on http://localhost:${PORT}`);
+  console.log(`\n  JollyLLM API listening on http://localhost:${PORT}`);
   console.log(`  Corpus: ${kb.provisions().length} provisions, ${kb.judgments().length} judgments`);
   console.log(`  Language model: ${llm.isEnabled() ? llm.describe().model : "not configured (deterministic mode)"}\n`);
   // Warm the retrieval engine so the first user request is not the slow one.

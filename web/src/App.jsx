@@ -5,6 +5,7 @@ import Landing from "./views/Landing.jsx";
 import Intake from "./views/Intake.jsx";
 import Sources from "./views/Sources.jsx";
 import PdfPanel from "./views/PdfPanel.jsx";
+import CaseDocuments from "./views/CaseDocuments.jsx";
 import AdvocateChat from "./views/AdvocateChat.jsx";
 import OpponentArena from "./views/OpponentArena.jsx";
 import WorkspacesDirectory from "./views/WorkspacesDirectory.jsx";
@@ -116,7 +117,7 @@ function TopBar({ route, go, health, hasCase, onReset }) {
               fontSize: "1.05rem",
               color: "var(--black)",
               lineHeight: 1.1,
-            }}>NyayaPath</span>
+            }}>JollyLLM</span>
             <span style={{
               fontFamily: "var(--mono)",
               fontSize: "0.52rem",
@@ -479,7 +480,7 @@ function NewWorkspaceModal({ open, onClose, onCreate }) {
    Workspace screen
    ------------------------------------------------------------------------- */
 
-function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast }) {
+function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast, caseId, documents, onDocumentsChanged }) {
   const [tab, setTab] = useState("overview");
   const [evidence, setEvidence] = useState(() => new Set());
   const [done, setDone] = useState(() => new Set());
@@ -513,7 +514,7 @@ function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `nyayapath-${(data.summary.headline || "case").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.txt`;
+    a.download = `JollyLLM-${(data.summary.headline || "case").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
     onToast("Dossier downloaded");
@@ -620,6 +621,7 @@ function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast }
               onGroupChange={setResearchGroup}
               act={researchAct}
               onActChange={setResearchAct}
+              onToast={onToast}
             />
           ) : null}
           {tab === "opponent" ? (
@@ -638,14 +640,20 @@ function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast }
           ) : null}
           {tab === "documents" ? (
             <>
-              <Notice tone="info" title="Bring your own documents">
+              <Notice tone="info" title="Documents stay in this workspace">
                 <p>
-                  Nothing you upload is stored. The file is read in memory to pull out text and dates,
-                  then discarded. If a document will not read, type what it says into the narrative
-                  instead.
+                  A file you upload here is stored against this case only, and its text is read for
+                  dates and facts. No other workspace can see it. If a document will not read, type
+                  what it says into the narrative instead.
                 </p>
               </Notice>
-              <PdfPanel />
+              <PdfPanel caseId={caseId} onStored={onDocumentsChanged} />
+              <CaseDocuments
+                caseId={caseId}
+                documents={documents}
+                onChanged={onDocumentsChanged}
+                onToast={onToast}
+              />
               <div className="panel" style={{ marginTop: 22 }}>
                 <div className="panel__head">
                   <div>
@@ -686,11 +694,29 @@ function Workspace({ data, form, meta, samples, go, onReset, onDelete, onToast }
                       Reason: <code>{data.llm.reason}</code>
                     </p>
                   ) : null}
-                  <p style={{ marginTop: 10 }}>
-                    To turn it on, copy <code>server/.env.example</code> to{" "}
-                    <code>server/.env</code>, put a real provider key in it, and restart the API. The
-                    key stays on the server and is never sent to the browser.
-                  </p>
+                  {data.llm?.providerMessage ? (
+                    <p style={{ marginTop: 8, fontSize: "0.82rem", color: "var(--ink-faint)" }}>
+                      The provider said: {data.llm.providerMessage}
+                    </p>
+                  ) : null}
+                  {data.llm?.retryAfterSeconds ? (
+                    <p style={{ marginTop: 6, fontSize: "0.82rem", color: "var(--ink-faint)" }}>
+                      The limit clears in about {Math.round(data.llm.retryAfterSeconds)} seconds. A
+                      retry after that will use the model again.
+                    </p>
+                  ) : null}
+                  {data.llm?.modelsTried?.length ? (
+                    <p style={{ marginTop: 6, fontSize: "0.82rem", color: "var(--ink-faint)" }}>
+                      Models tried: {data.llm.modelsTried.join(", ")}
+                    </p>
+                  ) : null}
+                  {data.llm?.reason === "not_configured" ? (
+                    <p style={{ marginTop: 10 }}>
+                      To turn it on, copy <code>server/.env.example</code> to{" "}
+                      <code>server/.env</code>, put a real provider key in it, and restart the API. The
+                      key stays on the server and is never sent to the browser.
+                    </p>
+                  ) : null}
                 </Notice>
                 <Panel title="What you are looking at instead" icon="book">
                   <p style={{ fontSize: "0.86rem", color: "var(--ink-soft)", margin: 0 }}>
@@ -806,6 +832,22 @@ export default function App() {
     },
     [showToast]
   );
+
+  /**
+   * Re-read the case's document list. Upload and removal change the server
+   * state, so the list on screen has to come back from the server rather
+   * than be patched in the browser.
+   */
+  const refreshDocuments = useCallback(async () => {
+    if (!activeCase?.id) return;
+    try {
+      const res = await api.listCaseDocuments(activeCase.id);
+      setActiveCase((prev) => (prev ? { ...prev, documents: res?.documents || [] } : prev));
+    } catch {
+      // A failed refresh leaves the previous list on screen; the next action
+      // will try again.
+    }
+  }, [activeCase?.id]);
 
   async function handleCreateWorkspace(newTitle, newCategory, newJurisdiction) {
     try {
@@ -966,7 +1008,7 @@ export default function App() {
     return (
       <>
         <TopBar route={route} go={go} health={health} hasCase={false} onReset={reset} />
-        <Loading label="Starting NyayaPath…" />
+        <Loading label="Starting JollyLLM…" />
       </>
     );
   }
@@ -977,7 +1019,7 @@ export default function App() {
         <TopBar route={route} go={go} health={null} hasCase={false} onReset={reset} />
         <main className="section">
           <div className="shell shell--narrow">
-            <Notice tone="warn" title="The NyayaPath service is not reachable">
+            <Notice tone="warn" title="The JollyLLM service is not reachable">
               <p>{bootError.message}</p>
               <p style={{ marginTop: 10 }}>
                 Start it with <code>npm start</code> in the <code>server</code> folder, then reload
@@ -1061,6 +1103,9 @@ export default function App() {
             samples={samples}
             go={go}
             onReset={reset}
+            caseId={activeCase?.id || ""}
+            documents={activeCase?.documents || []}
+            onDocumentsChanged={refreshDocuments}
             onDelete={() => {
               if (
                 activeCase &&

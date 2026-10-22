@@ -1,5 +1,5 @@
 @echo off
-REM Start the NyayaPath API and the web app together.
+REM Start the JollyLLM API and the web app together.
 REM
 REM   scripts\run.cmd
 REM
@@ -13,7 +13,7 @@ set ROOT=%~dp0..
 pushd "%ROOT%"
 
 echo.
-echo   NyayaPath
+echo   JollyLLM
 echo   ---------
 echo   API  http://localhost:8787
 echo   Web  http://localhost:5173
@@ -39,8 +39,8 @@ if not exist "web\node_modules" (
   pushd web & call npm install & popd
 )
 
-start "NyayaPath API" cmd /k "cd /d "%ROOT%\server" && node src\index.js"
-start "NyayaPath Web" cmd /k "cd /d "%ROOT%\web" && npm run dev"
+start "JollyLLM API" cmd /k "cd /d "%ROOT%\server" && node src\index.js"
+start "JollyLLM Web" cmd /k "cd /d "%ROOT%\web" && npm run dev"
 
 echo   Both services starting. This window can be closed.
 echo   The web app is at http://localhost:5173

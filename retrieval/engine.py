@@ -1,5 +1,5 @@
 """
-NyayaPath retrieval engine
+JollyLLM retrieval engine
 ==========================
 
 A small, dependency-free lexical retrieval service over the curated legal corpus
@@ -533,6 +533,57 @@ def fuse(result_sets: list[tuple[list[dict], float]]) -> list[dict]:
     return out
 
 
+_TIER_BONUS = {"local": 0.02, "regional": 0.01, "national": 0.0}
+
+
+def _order_by_tier(results: list[dict], home: str = "") -> list[dict]:
+    """Prefer the user's own tier only when relevance is otherwise close.
+
+    The bonus is deliberately smaller than the differences the API bands on,
+    so it breaks near-ties without promoting an off-topic local document over a
+    clearly better national one. Records without a tier (the hand-curated
+    corpus) keep their existing order.
+    """
+    if not results or not any(r.get("tier") for r in results):
+        return results
+    home_fold = _fold(home) or "delhi"
+
+    def bonus(record: dict) -> float:
+        state = _fold(record.get("state"))
+        if state and state == home_fold:
+            return _TIER_BONUS["local"]
+        return _TIER_BONUS.get(str(record.get("tier") or "").lower(), 0.0)
+
+    out = sorted(results, key=lambda r: (
+        -(float(r.get("score") or 0.0) + bonus(r)),
+        str(r.get("id") or ""),
+    ))
+    for record in out:
+        state = _fold(record.get("state"))
+        record["tierRank"] = ("local" if state and state == home_fold
+                              else str(record.get("tier") or ""))
+    return out
+
+
+def _tier_buckets(results: list[dict]) -> list[dict]:
+    """The same results grouped local -> regional -> national.
+
+    A bucket is a view, not a re-ranking: relevance order is kept inside each
+    group so a weak local record cannot displace a strong national one.
+    """
+    groups: dict[str, list[str]] = {"local": [], "regional": [],
+                                    "national": [], "unassigned": []}
+    for record in results:
+        name = str(record.get("tierRank") or record.get("tier") or "").lower()
+        groups.setdefault(name if name in groups else "unassigned", []).append(
+            str(record.get("id") or ""))
+    labels = {"local": "Local", "regional": "Regional",
+              "national": "National", "unassigned": "Unassigned"}
+    return [{"name": name, "label": labels[name], "count": len(ids),
+             "record_ids": ids}
+            for name, ids in groups.items() if ids]
+
+
 # ---------------------------------------------------------------------------
 # Corpus loading
 # ---------------------------------------------------------------------------
@@ -543,6 +594,82 @@ def _read_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _read_optional(path: Path) -> dict:
+    """A snapshot that is missing or malformed leaves the corpus unchanged."""
+    try:
+        return _read_json(path)
+    except (OSError, ValueError):
+        return {}
+
+
+def _fold(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _first_party(record: dict) -> str:
+    title = _fold(record.get("title"))
+    if not title:
+        return ""
+    first = re.split(r"\s+v\s+", title)[0]
+    if len(first.split()) < 2:
+        return ""
+    if first in {"state", "union of india", "state of india"}:
+        return ""
+    return first
+
+
+def _provision_keys(record: dict) -> list[str]:
+    return [f"{_fold(record.get('act'))}:{_fold(record.get('section'))}"]
+
+
+def _judgment_keys(record: dict) -> list[str]:
+    keys = [f"id:{_fold(record.get('id'))}",
+            f"title:{_fold(record.get('title'))}",
+            f"cite:{_fold(record.get('citation'))}"]
+    party = _first_party(record)
+    if party:
+        keys.append(f"party:{party}")
+    return keys
+
+
+def _usable(keys: list[str]) -> list[str]:
+    return [k for k in keys if k and not k.endswith(":") and k != "::"]
+
+
+def _merge_records(base: list[dict], extra: object, keys_of) -> list[dict]:
+    """Additive overlay: an existing record wins, the snapshot fills blanks.
+
+    When the snapshot is absent this is the identity, so a deployment without
+    the legal edition behaves exactly as it did before.
+    """
+    if not isinstance(extra, list) or not extra:
+        return base
+    out = [dict(record) for record in base]
+    index: dict[str, int] = {}
+    for at, record in enumerate(out):
+        for key in _usable(keys_of(record)):
+            index.setdefault(key, at)
+
+    for record in extra:
+        if not isinstance(record, dict):
+            continue
+        at = next((index[key] for key in _usable(keys_of(record))
+                   if key in index), -1)
+        if at >= 0:
+            current = out[at]
+            for field, value in record.items():
+                if current.get(field) in (None, "") and value not in (None, ""):
+                    current[field] = value
+            if record.get("provenance"):
+                current["provenance"] = record["provenance"]
+        else:
+            out.append(dict(record))
+            at = len(out) - 1
+        for key in _usable(keys_of(out[at])):
+            index.setdefault(key, at)
+    return out
+
+
 class Corpus:
     def __init__(self) -> None:
         self.provisions_doc = _read_json(KNOWLEDGE_DIR / "provisions.json")
@@ -551,9 +678,15 @@ class Corpus:
         self.plans_doc = _read_json(KNOWLEDGE_DIR / "actionplans.json")
         self.samples_doc = _read_json(KNOWLEDGE_DIR / "samplecases.json")
 
-        self.acts = self.provisions_doc.get("acts", {})
-        self.provisions = self.provisions_doc.get("provisions", [])
-        self.judgments = self.judgments_doc.get("judgments", [])
+        edition = _read_optional(KNOWLEDGE_DIR / "legal_edition.json")
+        self.acts = {**(edition.get("acts") or {}),
+                     **(self.provisions_doc.get("acts") or {})}
+        self.provisions = _merge_records(
+            self.provisions_doc.get("provisions", []),
+            edition.get("provisions"), _provision_keys)
+        self.judgments = _merge_records(
+            self.judgments_doc.get("judgments", []),
+            edition.get("judgments"), _judgment_keys)
         self.categories = self.playbook_doc.get("categories", [])
 
         # A provision record only names its own issue category ("domestic-violence"),
@@ -782,7 +915,9 @@ def op_retrieve(payload: dict) -> dict:
                                    min_score=0.0)
         results = fuse([(wide_sparse, 0.4), (wide_dense, 0.6)])[:top_k]
 
-    return {
+    results = _order_by_tier(results, payload.get("homeJurisdiction") or "")
+
+    response = {
         "ok": True,
         "collection": collection,
         "results": results,
@@ -791,6 +926,9 @@ def op_retrieve(payload: dict) -> dict:
         "denseRequested": mode in ("dense", "hybrid"),
         "denseAvailable": bool(bundle and bundle.ready),
     }
+    if any(r.get("tier") for r in results):
+        response["tierBuckets"] = _tier_buckets(results)
+    return response
 
 
 def op_categorise(payload: dict) -> dict:

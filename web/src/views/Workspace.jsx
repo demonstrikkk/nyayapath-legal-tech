@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api.js";
 import { Icon, Meter, Notice, Panel, Tag, Empty } from "../ui.jsx";
 
 function AiBadge({ llm, compact }) {
@@ -1137,7 +1138,194 @@ function FormsPanel({ forms, meta }) {
   );
 }
 
-function LegalResearch({ data, meta, group, onGroupChange, act, onActChange }) {
+/**
+ * Search the live datagoblin legal dataset.
+ *
+ * Only the search text is sent. The dataset's key stays on the server, and
+ * the client's case material never leaves this browser. When no live dataset
+ * is configured the panel says so instead of showing an empty result as
+ * though the search had found nothing.
+ */
+function DatasetSearch({ onToast }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .legalDatasetStatus()
+      .then((s) => setStatus(s))
+      .catch(() => setStatus({ configured: false }));
+  }, []);
+
+  async function run(e) {
+    e?.preventDefault?.();
+    const text = query.trim();
+    if (!text) return;
+    setBusy(true);
+    try {
+      const res = await api.searchLegalDataset(text, 20);
+      setResult(res);
+      if (res?.configured === false) {
+        onToast?.("No live dataset is configured; the bundled corpus is the source here.");
+      }
+    } catch (err) {
+      onToast?.(`The dataset search failed: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const configured = status?.configured === true;
+  const records = result?.records || [];
+
+  return (
+    <Panel
+      title="Search the live legal dataset"
+      icon="search"
+      sub={
+        configured
+          ? "Keyword match over the dataset's stored page text"
+          : "No live dataset is configured for this instance"
+      }
+    >
+      {!configured ? (
+        <Notice tone="info" title="The bundled corpus is the source here">
+          <p>
+            This instance is not connected to a live datagoblin dataset, so the provisions and
+            decisions shown on this page come from the bundled corpus. A live dataset would add
+            records scraped from official sources, searched on the server.
+          </p>
+        </Notice>
+      ) : null}
+
+      <form onSubmit={run} style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="e.g. dishonour of cheque, notice, 15 days"
+          aria-label="Search the live legal dataset"
+          disabled={!configured}
+          style={{
+            flex: "1 1 260px",
+            padding: "8px 11px",
+            borderRadius: "var(--radius)",
+            border: "1px solid var(--border)",
+            background: "var(--white)",
+            color: "var(--text)",
+            fontSize: "0.86rem",
+          }}
+        />
+        <button type="submit" className="btn btn--primary btn--sm" disabled={!configured || busy}>
+          {busy ? "Searching..." : "Search"}
+        </button>
+      </form>
+
+      {result?.configured === false ? (
+        <Notice tone="warn" title="Searched the bundled corpus instead">
+          <p>{result.detail}</p>
+        </Notice>
+      ) : null}
+
+      {result?.configured && records.length ? (
+        <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+          <p style={{ fontSize: "0.76rem", color: "var(--ink-faint)", margin: 0 }}>
+            {result.total} record{result.total === 1 ? "" : "s"} matched
+            {result.datasetId ? ` in dataset ${result.datasetId}` : ""}
+          </p>
+          <Notice tone="info" title="How this was matched">
+            <p>
+              The dataset is searched as text, so a record is returned when the words appear in the
+              page it was read from. This is a keyword match, not a judgement that the record applies
+              to your case — read the quoted text and check it against your facts.
+            </p>
+          </Notice>
+          {records.map((row, i) => {
+            // A datagoblin row is { record_id, fields: { name: { value, source } } }.
+            const fields = row?.fields || row || {};
+            const field = (name) => {
+              const f = fields[name];
+              // A field that is not there reads as empty, not as
+              // "[object Object]".
+              if (f === undefined || f === null) return { value: "", quote: "", url: "" };
+              const raw = typeof f === "object" ? f.value : f;
+              const src = typeof f === "object" && f ? f.source || {} : {};
+              return {
+                value: raw === null || raw === undefined ? "" : String(raw),
+                quote: String(src.quote || ""),
+                url: String(src.url || ""),
+              };
+            };
+            const title = field("document_title");
+            const citation = field("citation");
+            const court = field("court");
+            const summary = field("summary");
+            const holding = field("holding");
+            const docType = field("document_type");
+            const quote = summary.quote || holding.quote || "";
+            const url = title.url || citation.url;
+
+            return (
+              <div
+                key={i}
+                style={{ border: "1px solid var(--ivory-300)", borderRadius: "var(--radius)", padding: 12 }}
+              >
+                <div style={{ fontWeight: 600, fontSize: "0.86rem", color: "var(--navy-800)" }}>
+                  {url ? (
+                    <a href={url} target="_blank" rel="noreferrer">
+                      {title.value || citation.value}
+                    </a>
+                  ) : (
+                    title.value || citation.value
+                  )}
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    flexWrap: "wrap",
+                    marginTop: 5,
+                    fontSize: "0.72rem",
+                    color: "var(--ink-faint)",
+                  }}
+                >
+                  {citation.value ? <Tag tone="plain">{citation.value}</Tag> : null}
+                  {court.value ? <Tag tone="plain">{court.value}</Tag> : null}
+                  {docType.value ? <Tag tone="plain">{docType.value}</Tag> : null}
+                </div>
+                {quote ? (
+                  <p
+                    style={{
+                      margin: "8px 0 0",
+                      fontSize: "0.8rem",
+                      lineHeight: 1.6,
+                      color: "var(--ink-soft)",
+                      borderLeft: "2px solid var(--ivory-300)",
+                      paddingLeft: 10,
+                    }}
+                  >
+                    {quote.length > 420 ? `${quote.slice(0, 420)}...` : quote}
+                  </p>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {result?.configured && !records.length && !busy ? (
+        <Empty title="No record matched" icon="search">
+          Nothing in the live dataset matched that wording. The bundled corpus is still searched by
+          the analysis on this case.
+        </Empty>
+      ) : null}
+    </Panel>
+  );
+}
+
+function LegalResearch({ data, meta, group, onGroupChange, act, onActChange, onToast }) {
   const tabRefs = useRef({});
   const groupCounts = useMemo(
     () =>
@@ -1318,6 +1506,10 @@ function LegalResearch({ data, meta, group, onGroupChange, act, onActChange }) {
               Retrieval engine: {data.uncertainty.engine}
             </p>
           </Panel>
+
+          <div style={{ marginTop: 18 }}>
+            <DatasetSearch onToast={onToast} />
+          </div>
         </div>
       </div>
     </>
@@ -1766,7 +1958,7 @@ export function buildPrintDocument(data, form) {
   const L = [];
   const push = (s = "") => L.push(s);
 
-  push("NyayaPath — preliminary case dossier");
+  push("JollyLLM — preliminary case dossier");
   push("=".repeat(64));
   push("");
   push(`Matter:            ${data.summary.headline}`);
@@ -1865,7 +2057,7 @@ export function buildPrintDocument(data, form) {
   });
   push("");
   push("-".repeat(64));
-  push("Generated by NyayaPath. Verify every citation before relying on it.");
+  push("Generated by JollyLLM. Verify every citation before relying on it.");
 
   return L.join("\n");
 }

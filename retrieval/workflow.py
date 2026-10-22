@@ -1,5 +1,5 @@
 """
-NyayaPath LangGraph Case Strategy Workflow
+JollyLLM LangGraph Case Strategy Workflow
 ==========================================
 
 Implements a typed, versioned, stateful LangGraph agentic workflow for legal strategy:

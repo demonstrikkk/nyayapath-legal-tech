@@ -367,7 +367,7 @@ export default function FindLawyer({ meta }) {
           <h1>Find a lawyer</h1>
           <p className="law-intro__lede">
             {directoryEmpty
-              ? "No authorised lawyer listings are configured, so the filters below are disabled. NyayaPath does not substitute fictional profiles."
+              ? "No authorised lawyer listings are configured, so the filters below are disabled. JollyLLM does not substitute fictional profiles."
               : "Search by legal issue, city, consultation budget and mode. Results are filtered deterministically from the information each profile provides - not ranked by an AI guess, ratings or case-success claims."}
           </p>
         </section>
@@ -584,7 +584,7 @@ export default function FindLawyer({ meta }) {
               {directoryEmpty ? (
                 <>
                   <Empty icon="info" title="No lawyer listings are available">
-                    No authorised lawyer directory is configured. NyayaPath does not show fictional
+                    No authorised lawyer directory is configured. JollyLLM does not show fictional
                     or unverified profiles as real listings.
                   </Empty>
                   <div className="law-cta">

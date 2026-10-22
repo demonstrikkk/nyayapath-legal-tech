@@ -49,19 +49,29 @@ function env(...names) {
 
 /** Resolve provider config once. Never returns the key. */
 export function config() {
-  const providerKey = (env("LLM_PROVIDER", "NYAYAPATH_LLM_PROVIDER") || "groq").toLowerCase();
+  const providerKey = (env("LLM_PROVIDER", "JollyLLM_LLM_PROVIDER") || "groq").toLowerCase();
   const provider = PROVIDERS[providerKey] || PROVIDERS.generic;
 
   const apiKey = env(
     "LLM_API_KEY",
     "GROQ_API_KEY",
     "OPENAI_API_KEY",
-    "NYAYAPATH_LLM_API_KEY",
+    "JollyLLM_LLM_API_KEY",
   );
-  const baseUrl = (env("LLM_BASE_URL", "NYAYAPATH_LLM_BASE_URL") || provider.baseUrl || "").replace(/\/+$/, "");
-  const model = env("LLM_MODEL", "NYAYAPATH_LLM_MODEL") || provider.defaultModel || "";
+  const baseUrl = (env("LLM_BASE_URL", "JollyLLM_LLM_BASE_URL") || provider.baseUrl || "").replace(/\/+$/, "");
+  const model = env("LLM_MODEL", "JollyLLM_LLM_MODEL") || provider.defaultModel || "";
 
-  const toggle = env("LLM_ENABLED", "NYAYAPATH_LLM_ENABLED");
+  // Fallback models, tried in order when the first one cannot be used.
+  //
+  // Providers meter quota per model, so a model whose daily budget is spent
+  // does not stop a different model from answering. A single configured
+  // model therefore makes an exhausted quota look like a broken app.
+  const fallbackModels = env("LLM_FALLBACK_MODELS", "JollyLLM_LLM_FALLBACK_MODELS")
+    .split(",")
+    .map((m) => m.trim())
+    .filter((m) => m && m !== model);
+
+  const toggle = env("LLM_ENABLED", "JollyLLM_LLM_ENABLED");
   const explicitlyOff = toggle.toLowerCase() === "false" || toggle === "0";
 
   const missing = [];
@@ -75,6 +85,7 @@ export function config() {
     apiKey,
     baseUrl,
     model,
+    fallbackModels,
     explicitlyOff,
     missing,
     // A usable configuration: not disabled, and key + base + model all present.
@@ -90,11 +101,13 @@ export function isEnabled() {
 export function describe() {
   const c = config();
   const mode = c.ready ? "ai" : "deterministic";
+  const outcome = lastOutcome();
   return {
     enabled: c.ready,
     mode,
     provider: c.providerLabel,
     model: c.ready ? c.model : null,
+    fallbackModels: c.fallbackModels,
     explicitlyOff: c.explicitlyOff,
     missing: c.missing,
     detail: c.ready
@@ -103,6 +116,9 @@ export function describe() {
         ? "Live AI is switched off by configuration. Every field is produced by the bundled corpus and the retrieval engine."
         : `Live AI is not configured (missing ${c.missing.join(", ")}). Every field is produced by the bundled corpus and the retrieval engine. Set the variables in server/.env and restart to enable it.`,
     fallback: "deterministic",
+    // What the last real request did. This is what makes a spent quota
+    // visible instead of looking like a silent fallback.
+    lastOutcome: outcome,
   };
 }
 
@@ -114,23 +130,42 @@ export function describe() {
  * The model is not trusted with legal references. Any section-like or
  * citation-like token in free text is checked against the IDs we injected.
  */
-const ID_PATTERN = /\b(?:s\.\s*)?\d{1,3}[A-Za-z]?(?:\(\d+\))?/g;
 
-function scrubLegalReferences(text, allowedIds) {
+/**
+ * A number that only means something as a legal reference.
+ *
+ * The earlier version matched every bare number in the text, which quietly
+ * rewrote the client's own facts: "married in 2021" became "married in 1"
+ * and "Rs 42,000" became "Rs ?". A number is only a legal reference when a
+ * legal word introduces it, so that is the only place the scrubber looks.
+ */
+const LEGAL_REFERENCE_PATTERN =
+  /(\b(?:section|sections|sec|secs|s|ss|article|articles|art|chapter|part|schedule|rule|order|clause|sub-?section|proviso)\s*\.?\s*)(\d{1,4}[A-Za-z]?)\b/gi;
+
+/** Every number that appears in the narrative. The client's facts are not up for correction. */
+function numbersIn(text) {
+  const out = new Set();
+  if (typeof text !== "string") return out;
+  for (const m of text.match(/\d{1,6}/g) || []) out.add(m);
+  return out;
+}
+
+export function scrubLegalReferences(text, allowedIds) {
   if (typeof text !== "string") return "";
   // Neutralise obvious citation shapes before checking anything else.
   let out = text.replace(/\(\s*\d{4}\s*\)\s*\d+\s*SCC/gi, "a cited case");
-  // Any bare section number that is not a known corpus id is removed.
-  const tokens = out.match(ID_PATTERN);
-  if (tokens) {
-    for (const t of tokens) {
-      const numeric = t.replace(/^s\.\s*/, "").trim();
-      if (!numeric) continue;
-      if (!allowedIds.has(numeric)) {
-        out = out.replace(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "");
-      }
-    }
-  }
+
+  // Only a number introduced by a legal word is a legal reference, and only
+  // one that is neither in the corpus nor in the client's own account is
+  // removed.
+  out = out.replace(LEGAL_REFERENCE_PATTERN, (match, cue, number) => {
+    const numeric = number.replace(/^s\.\s*/, "").trim();
+    if (!numeric) return match;
+    if (allowedIds.has(numeric)) return match;
+    // The invented reference goes; the words around it stay.
+    return cue.replace(/\s*$/, "");
+  });
+
   return out.replace(/\s{2,}/g, " ").trim();
 }
 
@@ -142,10 +177,13 @@ function asStringArray(v, max = 12) {
     .slice(0, max);
 }
 
-function validate(raw, ctx) {
+export function validate(raw, ctx) {
   const allowedIds = new Set(
     [...ctx.provisions.map((p) => p.section), ...ctx.provisions.map((p) => p.id)],
   );
+  // A number the client wrote is their fact, not a legal reference the model
+  // invented, so it is allowed through.
+  for (const n of numbersIn(ctx.narrative)) allowedIds.add(n);
   const s = (v) => scrubLegalReferences(v, allowedIds);
 
   const out = {
@@ -208,17 +246,25 @@ function validate(raw, ctx) {
    --------------------------------------------------------------------------- */
 
 function buildMessages(ctx) {
+  // The prompt is the app's biggest per-minute cost: a provider with an
+  // 8,000 token-per-minute budget fits only a handful of full analyses.
+  // Each block is therefore capped, and the caps are generous enough to keep
+  // the legal substance while cutting the wasted tokens.
+  const PROVISION_SUMMARY_CHARS = 420;
+  const JUDGMENT_HOLDING_CHARS = 420;
+  const MAX_EVIDENCE_ITEMS = 8;
+
   const provisionBlock = ctx.provisions
     .map(
       (p) =>
-        `[${p.id}] ${p.actShortTitle || p.act}\n  ${p.heading}\n  ${p.summary}\n  Source: ${p.sourceUrl}`,
+        `[${p.id}] ${p.actShortTitle || p.act}\n  ${p.heading}\n  ${String(p.summary || "").slice(0, PROVISION_SUMMARY_CHARS)}\n  Source: ${p.sourceUrl}`,
     )
     .join("\n");
 
   const judgmentBlock = ctx.judgments
     .map(
       (j) =>
-        `[${j.id}] ${j.title}, ${j.citation} (${j.court}, ${j.year})\n  Held: ${j.holding}\n  Verify: ${j.verifyUrl}`,
+        `[${j.id}] ${j.title}, ${j.citation} (${j.court}, ${j.year})\n  Held: ${String(j.holding || "").slice(0, JUDGMENT_HOLDING_CHARS)}\n  Verify: ${j.verifyUrl}`,
     )
     .join("\n");
 
@@ -264,7 +310,10 @@ function buildMessages(ctx) {
     judgmentBlock || "(none matched)",
     "",
     "=== EVIDENCE CHECKLIST BASE ===",
-    ctx.evidence.map((e) => `- ${e.item}`).join("\n") || "(none)",
+    ctx.evidence
+      .slice(0, MAX_EVIDENCE_ITEMS)
+      .map((e) => `- ${e.item}`)
+      .join("\n") || "(none)",
     "",
     "Return the JSON object now.",
   ].join("\n");
@@ -279,7 +328,62 @@ function buildMessages(ctx) {
    Provider call
    --------------------------------------------------------------------------- */
 
-function classifyHttp(status, body) {
+/**
+ * Turn a provider error body into a sentence worth showing a human.
+ *
+ * A provider's 429 usually names the limit it hit - tokens per day, tokens
+ * per minute, requests per minute - and how long to wait. That distinction
+ * decides everything: a per-minute limit clears in seconds, a daily quota
+ * does not, and a wrong key does not clear at all.
+ */
+function providerMessage(body) {
+  const text = String(body || "");
+  if (!text) return "";
+  try {
+    const parsed = JSON.parse(text);
+    const message = parsed?.error?.message || parsed?.message || parsed?.detail;
+    if (message) return String(message).slice(0, 400);
+  } catch {
+    // Not JSON: fall through to the raw text.
+  }
+  return text.slice(0, 300);
+}
+
+/**
+ * Which limit did the provider hit, and when does it clear?
+ *
+ * Returns { scope, retryAfterSeconds, message } or null when the body does
+ * not say.
+ */
+function quotaScope(body) {
+  const message = providerMessage(body);
+  if (!message) return null;
+  const lower = message.toLowerCase();
+
+  let scope = "unknown";
+  if (lower.includes("tokens per day") || lower.includes("tpd")) scope = "daily_tokens";
+  else if (lower.includes("tokens per minute") || lower.includes("tpm")) scope = "per_minute_tokens";
+  else if (lower.includes("requests per day")) scope = "daily_requests";
+  else if (lower.includes("requests per minute") || lower.includes("rpm")) scope = "per_minute_requests";
+
+  // "Please try again in 1m32.88s" or "in 93s"
+  const wait = message.match(/try again in\s+([0-9.]+)\s*(m|s|ms|h)?/i);
+  let retryAfterSeconds = null;
+  if (wait) {
+    const value = Number(wait[1]);
+    const unit = (wait[2] || "s").toLowerCase();
+    if (Number.isFinite(value)) {
+      if (unit === "m") retryAfterSeconds = value * 60;
+      else if (unit === "h") retryAfterSeconds = value * 3600;
+      else if (unit === "ms") retryAfterSeconds = value / 1000;
+      else retryAfterSeconds = value;
+    }
+  }
+
+  return { scope, retryAfterSeconds, message };
+}
+
+function classifyHttp(status, body, headers = null) {
   if (status === 401 || status === 403) {
     return {
       ok: false,
@@ -288,7 +392,38 @@ function classifyHttp(status, body) {
     };
   }
   if (status === 429) {
-    return { ok: false, error: "rate_limited", message: "The provider is rate limiting requests." };
+    const quota = quotaScope(body);
+    const headerRetry = headers?.get?.("retry-after");
+    const headerSeconds = headerRetry ? Number(headerRetry) : null;
+    const retryAfterSeconds =
+      Number.isFinite(headerSeconds) && headerSeconds > 0
+        ? headerSeconds
+        : quota?.retryAfterSeconds ?? null;
+
+    // The provider's own words, because "rate limited" on its own does not
+    // say whether to wait a minute or until tomorrow.
+    const detail = quota?.message || providerMessage(body);
+    const scope = quota?.scope || "unknown";
+
+    const scopeText = {
+      daily_tokens: "The provider's daily token allowance for this model is spent.",
+      per_minute_tokens: "The provider's per-minute token limit is reached.",
+      daily_requests: "The provider's daily request allowance is spent.",
+      per_minute_requests: "The provider's per-minute request limit is reached.",
+      unknown: "The provider is rate limiting requests.",
+    }[scope];
+
+    return {
+      ok: false,
+      error: "rate_limited",
+      message: scopeText,
+      scope,
+      retryAfterSeconds,
+      providerMessage: detail,
+      // A daily quota is not a transient blip: retrying in a second will not
+      // help, and the caller needs to know that.
+      quotaExhausted: scope === "daily_tokens" || scope === "daily_requests",
+    };
   }
   if (status === 404) {
     return {
@@ -375,7 +510,7 @@ async function callProvider(c, messages, { timeoutMs, jsonMode, model = null, te
     }
     let parsed = null;
     if (jsonMode) {
-      parsed = parseJson(content);
+      parsed = extractJson(content);
     }
     return { ok: true, content, data: parsed, usage: data?.usage || null, model: data?.model || targetModel };
   } catch (err) {
@@ -386,6 +521,30 @@ async function callProvider(c, messages, { timeoutMs, jsonMode, model = null, te
         message: `The provider did not respond within ${Math.round(timeoutMs / 1000)}s.`,
       };
     }
+
+    // An abort that lands while the body is being read surfaces as a
+    // TypeError with an AbortError cause, not as an AbortError itself.
+    const causeName = err?.cause?.name;
+    if (causeName === "AbortError") {
+      return {
+        ok: false,
+        error: "timeout",
+        message: `The provider did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+      };
+    }
+
+    // A programming error is not a network problem. Calling it one hides the
+    // actual defect: a mistyped function name once made every working
+    // completion look like an unreachable provider.
+    if (err instanceof ReferenceError || err instanceof TypeError) {
+      return {
+        ok: false,
+        error: "internal_error",
+        message: "The model call failed because of a defect in this service, not the provider.",
+        detail: String(err?.message || err).slice(0, 160).replace(/[A-Za-z0-9_-]{20,}/g, "[redacted]"),
+      };
+    }
+
     return {
       ok: false,
       error: "network_error",
@@ -395,6 +554,16 @@ async function callProvider(c, messages, { timeoutMs, jsonMode, model = null, te
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The model this service is configured to use.
+ *
+ * Callers that used to hardcode a model id ended up on a different, slower
+ * model than the one the operator configured. They ask for this instead.
+ */
+export function configuredModel() {
+  return config().model;
 }
 
 /**
@@ -415,6 +584,45 @@ export async function chatCompletion({
   return callProvider(c, messages, { timeoutMs, jsonMode, model, temperature, maxTokens });
 }
 
+/**
+ * Chat completion that moves on to the next configured model when one is
+ * rate limited.
+ *
+ * The single-model version above fails the whole call when the provider says
+ * no. That is how a spent quota turned into a silent fallback in three
+ * different features at once.
+ */
+export async function chatCompletionWithFallback({
+  model = null,
+  messages = [],
+  temperature = 0.2,
+  maxTokens = 2000,
+  jsonMode = true,
+  timeoutMs = 15000,
+} = {}) {
+  const c = config();
+  if (!c.ready) {
+    return { ok: false, error: "not_configured", message: "LLM is not enabled or configured" };
+  }
+
+  const chain = model ? [model] : [c.model, ...c.fallbackModels];
+  const tried = [];
+  let last = null;
+
+  for (const target of chain) {
+    tried.push(target);
+    const res = await callProvider(c, messages, { timeoutMs, jsonMode, model: target, temperature, maxTokens });
+    if (res.ok) return { ...res, modelsTried: tried };
+    last = res;
+    // Only a quota problem is worth another model. Anything else - a bad
+    // key, a malformed request - would fail the same way on every model.
+    if (res.error !== "rate_limited" && res.error !== "model_not_found") break;
+  }
+
+  recordFailure(last, c, Date.now());
+  return { ...last, modelsTried: tried };
+}
+
 
 /**
  * Hard caps on the model call.
@@ -423,11 +631,17 @@ export async function chatCompletion({
  * a generous LLM_TIMEOUT_MS turns POST /api/analyze into a request that hangs
  * for minutes with no response at all. The model is an enhancement; it is never
  * allowed to decide whether the API answers.
+ *
+ * The total must stay under the analysis deadline (ANALYZE_DEADLINE_MS,
+ * 45s), or the request would be cut off by the server while the model call
+ * was still running. A reasoning model asked for 2,000 tokens regularly
+ * needs 15-25 seconds, so a 10 second per-attempt cap was failing calls that
+ * were about to succeed.
  */
 export const AI_BUDGET = {
-  perAttemptMs: 10_000,
+  perAttemptMs: 25_000,
   maxAttempts: 2,
-  totalMs: 14_000,
+  totalMs: 40_000,
 };
 
 /**
@@ -504,62 +718,97 @@ async function runAnalysis(ctx) {
   const jsonMode = (process.env.LLM_JSON_MODE || "true").toLowerCase() !== "false";
   const messages = buildMessages(ctx);
 
+  // The models to try, in order. Providers meter quota per model, so a model
+  // whose budget is spent does not stop the next one from answering.
+  const modelChain = [c.model, ...c.fallbackModels];
+
   let lastError = null;
+  const triedModels = [];
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    // Never start an attempt we cannot finish inside the total budget.
-    if (Date.now() - startedAt >= AI_BUDGET.totalMs - perAttempt / 2) {
-      lastError = { error: "budget_exhausted", message: "The time budget for model analysis ran out." };
-      break;
-    }
+  for (const targetModel of modelChain) {
+    triedModels.push(targetModel);
 
-    const res = await callProvider(c, messages, {
-      timeoutMs: perAttempt,
-      jsonMode,
-    });
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      // Never start an attempt we cannot finish inside the total budget.
+      if (Date.now() - startedAt >= AI_BUDGET.totalMs - perAttempt / 2) {
+        lastError = { error: "budget_exhausted", message: "The time budget for model analysis ran out." };
+        break;
+      }
 
-    if (res.ok) {
-      const parsed = extractJson(res.content);
-      if (!parsed) {
-        lastError = {
-          error: "malformed_json",
-          message: "The model replied with text that is not valid JSON.",
-        };
-      } else {
-        const validated = validate(parsed, ctx);
-        if (validated.empty) {
+      const res = await callProvider(c, messages, {
+        timeoutMs: perAttempt,
+        jsonMode,
+        model: targetModel,
+      });
+
+      if (res.ok) {
+        const parsed = extractJson(res.content);
+        if (!parsed) {
           lastError = {
-            error: "empty_analysis",
-            message: "The model's reply contained no usable content.",
+            error: "malformed_json",
+            message: "The model replied with text that is not valid JSON.",
           };
         } else {
-          return {
-            ok: true,
-            mode: "ai",
-            provider: c.providerLabel,
-            model: res.model || c.model,
-            ...validated,
-            notices: [
-              "Machine-generated. Grounded in the sources listed, but a lawyer has not reviewed it.",
-              "Section numbers, citations, deadlines and forms come from the verified corpus, not from the model.",
-            ],
-            usage: res.usage,
-            attempts: attempt,
-            durationMs: Date.now() - startedAt,
-          };
+          const validated = validate(parsed, ctx);
+          if (validated.empty) {
+            lastError = {
+              error: "empty_analysis",
+              message: "The model's reply contained no usable content.",
+            };
+          } else {
+            return {
+              ok: true,
+              mode: "ai",
+              provider: c.providerLabel,
+              model: res.model || targetModel,
+              ...validated,
+              notices: [
+                "Machine-generated. Grounded in the sources listed, but a lawyer has not reviewed it.",
+                "Section numbers, citations, deadlines and forms come from the verified corpus, not from the model.",
+              ],
+              usage: res.usage,
+              attempts: attempt,
+              modelsTried: triedModels,
+              durationMs: Date.now() - startedAt,
+            };
+          }
+        }
+      } else {
+        lastError = res;
+
+        // A quota that will not clear is not a blip. Retrying the same model
+        // in a second wastes the request; move to the next model instead.
+        if (res.quotaExhausted) break;
+
+        // Only transient conditions are worth a second attempt, and only if
+        // the provider says the limit clears inside the remaining budget.
+        const transient = ["rate_limited", "provider_outage", "network_error", "timeout"].includes(res.error);
+        if (!transient) break;
+
+        if (res.error === "rate_limited") {
+          const waitMs = Math.ceil((res.retryAfterSeconds || 0) * 1000);
+          const remaining = AI_BUDGET.totalMs - (Date.now() - startedAt);
+          // Wait exactly as long as the provider asked, but only when that
+          // wait still leaves room for the call itself.
+          if (!waitMs || waitMs + 1500 > remaining) break;
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+
+        if (attempt < attempts) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
         }
       }
-    } else {
-      lastError = res;
-      // Only transient conditions are worth a second attempt.
-      const transient = ["rate_limited", "provider_outage", "network_error", "timeout"].includes(res.error);
-      if (!transient) break;
     }
 
-    if (attempt < attempts) {
-      await new Promise((r) => setTimeout(r, 400 * attempt));
+    // The model is exhausted. If another one is configured, try it.
+    if (lastError?.error === "rate_limited" || lastError?.error === "model_not_found") {
+      continue;
     }
+    break;
   }
+
+  recordFailure(lastError, c, startedAt);
 
   return {
     ok: false,
@@ -568,7 +817,65 @@ async function runAnalysis(ctx) {
     message: lastError?.message || "The model could not be used for this request.",
     provider: c.providerLabel,
     model: c.model,
+    modelsTried: triedModels,
+    // The provider's own words, so "rate limited" is not the end of the
+    // explanation: a daily quota and a per-minute limit need different
+    // responses from whoever is reading the log.
+    providerMessage: lastError?.providerMessage || null,
+    scope: lastError?.scope || null,
+    retryAfterSeconds: lastError?.retryAfterSeconds ?? null,
+    quotaExhausted: Boolean(lastError?.quotaExhausted),
+    // The underlying transport error, when there was one. Without it a
+    // "network error" and a "socket closed mid-response" look identical.
+    detail: lastError?.detail || null,
     durationMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * The last provider failure, kept in memory.
+ *
+ * A provider that is reachable and serves the configured model can still be
+ * unusable - a spent daily quota says nothing about the key or the endpoint,
+ * and the model list still shows the model as served. So the health check
+ * has to remember what actually happened on the last real request, or it
+ * reports "ai" while every call is falling back.
+ */
+let lastFailure = null;
+
+function recordFailure(err, c, startedAt) {
+  if (!err) {
+    lastFailure = null;
+    return;
+  }
+  lastFailure = {
+    at: new Date().toISOString(),
+    reason: err.error || "unknown",
+    message: err.message || "",
+    providerMessage: err.providerMessage || null,
+    scope: err.scope || null,
+    quotaExhausted: Boolean(err.quotaExhausted),
+    retryAfterSeconds: err.retryAfterSeconds ?? null,
+    model: c?.model || null,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/** What the last real request did, and whether the provider looks usable now. */
+export function lastOutcome() {
+  if (!lastFailure) return { failed: false, usable: true, failure: null };
+
+  // A per-minute limit clears on its own, so the provider is usable again
+  // shortly. A daily quota does not clear until the provider says so.
+  const retryMs = lastFailure.retryAfterSeconds ? lastFailure.retryAfterSeconds * 1000 : 0;
+  const clearsAt = lastFailure.at ? Date.parse(lastFailure.at) + retryMs : 0;
+  const expired = !retryMs || Date.now() > clearsAt;
+
+  return {
+    failed: true,
+    usable: expired,
+    failure: lastFailure,
+    clearsAt: clearsAt ? new Date(clearsAt).toISOString() : null,
   };
 }
 
@@ -627,11 +934,17 @@ export async function probe() {
     }
 
     const modelAvailable = ids.includes(c.model);
+    // A fallback model that the provider does serve is worth reporting: the
+    // app will use it when the primary one is unusable.
+    const fallbackAvailable = c.fallbackModels.filter((m) => ids.includes(m));
+
     return {
       reachable: true,
       modelAvailable,
       provider: c.providerLabel,
       model: c.model,
+      fallbackModels: c.fallbackModels,
+      fallbackAvailable,
       ...(modelAvailable
         ? {}
         : {

@@ -1,5 +1,5 @@
 /**
- * NyayaPath Case State & Persistence Layer
+ * JollyLLM Case State & Persistence Layer
  *
  * Utilizes Node 24 native `node:sqlite` (DatabaseSync) for robust, ACID-compliant,
  * zero-dependency relational persistence.
@@ -29,7 +29,7 @@ if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const DB_PATH = process.env.NYAYAPATH_DB_PATH || path.join(DATA_DIR, "nyayapath.db");
+const DB_PATH = process.env.JollyLLM_DB_PATH || path.join(DATA_DIR, "JollyLLM.db");
 
 let dbInstance = null;
 
@@ -285,6 +285,41 @@ export const usersRepo = {
     );
     return { id: userId, created_at: createdAt, updated_at: createdAt, role };
   },
+
+  /**
+   * Has this browser already been given the sample workspaces?
+   *
+   * Every browser now has its own account, so the samples are seeded once per
+   * account rather than once per instance. Without the flag, deleting every
+   * workspace would bring the samples back.
+   */
+  isSeeded(userId) {
+    const db = getDb();
+    const row = db.prepare("SELECT metadata_json FROM users WHERE id = ?").get(userId);
+    if (!row?.metadata_json) return false;
+    try {
+      return Boolean(JSON.parse(row.metadata_json)?.demoSeeded);
+    } catch {
+      return false;
+    }
+  },
+
+  markSeeded(userId) {
+    const db = getDb();
+    const row = db.prepare("SELECT metadata_json FROM users WHERE id = ?").get(userId);
+    let metadata = {};
+    try {
+      metadata = row?.metadata_json ? JSON.parse(row.metadata_json) : {};
+    } catch {
+      metadata = {};
+    }
+    metadata.demoSeeded = true;
+    db.prepare("UPDATE users SET metadata_json = ?, updated_at = ? WHERE id = ?").run(
+      JSON.stringify(metadata),
+      now(),
+      userId,
+    );
+  },
 };
 
 export const casesRepo = {
@@ -342,8 +377,12 @@ export const casesRepo = {
   listByUser(userId) {
     const db = getDb();
     let rows = db.prepare("SELECT * FROM cases WHERE user_id = ? ORDER BY updated_at DESC").all(userId);
-    if (rows.length === 0 && userId === "litigant_demo") {
+    if (rows.length === 0 && !usersRepo.isSeeded(userId)) {
+      // A first-time browser gets the sample workspaces so the app is not
+      // empty on arrival. Every browser gets its own copy, so one person's
+      // samples are never another person's cases.
       this.seedDefaultWorkspaces(userId);
+      usersRepo.markSeeded(userId);
       rows = db.prepare("SELECT * FROM cases WHERE user_id = ? ORDER BY updated_at DESC").all(userId);
     }
     return rows;
@@ -450,7 +489,10 @@ export const casesRepo = {
     params.push(now());
     params.push(caseId);
 
-    db.prepare(`UPDATE cases SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+    db.prepare(`UPDATE cases SET ${updates.join(", ")} WHERE id = ?${userId ? " AND user_id = ?" : ""}`).run(
+      ...params,
+      ...(userId ? [userId] : []),
+    );
     return this.get(caseId, userId);
   },
 
@@ -706,9 +748,16 @@ export const actionPlanRepo = {
     };
   },
 
-  toggleItem(itemId, isCompleted) {
+  toggleItem(caseId, itemId, isCompleted) {
     const db = getDb();
-    db.prepare("UPDATE action_items SET is_completed = ? WHERE id = ?").run(isCompleted ? 1 : 0, itemId);
+    // The case is part of the WHERE clause, not just of the caller's check.
+    // A route that verified the case but then toggled by item id alone would
+    // let a known item id be flipped in another case.
+    db.prepare("UPDATE action_items SET is_completed = ? WHERE id = ? AND case_id = ?").run(
+      isCompleted ? 1 : 0,
+      itemId,
+      caseId,
+    );
   },
 };
 
@@ -756,6 +805,86 @@ export const auditRepo = {
   },
 };
 
+export const authoritiesRepo = {
+  /**
+   * Record the authorities a case relied on.
+   *
+   * One row per authority, keyed by type, identifier and source, so a second
+   * run of the same research updates the existing row rather than stacking
+   * duplicates. An authority with no identifier is not recorded: a citation
+   * that names nothing is not evidence.
+   */
+  saveMany(caseId, authorities = []) {
+    const db = getDb();
+    const createdAt = now();
+    const saved = [];
+
+    for (const a of authorities) {
+      const identifier = String(a?.identifier || "").trim();
+      if (!identifier) continue;
+
+      const existing = db
+        .prepare(
+          `SELECT id FROM legal_authorities
+           WHERE case_id = ? AND authority_type = ? AND identifier = ? AND source_url IS ?`,
+        )
+        .get(caseId, a.authorityType, identifier, a.sourceUrl ?? null);
+
+      if (existing) {
+        db.prepare(
+          `UPDATE legal_authorities
+           SET title = ?, citation = ?, relevance_type = ?, ratio = ?,
+               verification_status = ?, score = ?
+           WHERE id = ?`,
+        ).run(
+          a.title || identifier,
+          a.citation ?? null,
+          a.relevanceType || "supporting",
+          a.ratio ?? null,
+          a.verificationStatus || "unverified",
+          a.score ?? null,
+          existing.id,
+        );
+        saved.push({ id: existing.id, identifier });
+        continue;
+      }
+
+      const id = uid("auth");
+      db.prepare(
+        `INSERT INTO legal_authorities
+           (id, case_id, authority_type, identifier, title, citation, relevance_type, ratio, source_url, verification_status, score, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        caseId,
+        a.authorityType || "statute",
+        identifier,
+        a.title || identifier,
+        a.citation ?? null,
+        a.relevanceType || "supporting",
+        a.ratio ?? null,
+        a.sourceUrl ?? null,
+        a.verificationStatus || "unverified",
+        a.score ?? null,
+        createdAt,
+      );
+      saved.push({ id, identifier });
+    }
+
+    if (saved.length) {
+      auditRepo.log(caseId, "authorities_recorded", "system", { count: saved.length });
+    }
+    return saved;
+  },
+
+  list(caseId) {
+    const db = getDb();
+    return db
+      .prepare("SELECT * FROM legal_authorities WHERE case_id = ? ORDER BY created_at ASC")
+      .all(caseId);
+  },
+};
+
 export const documentsRepo = {
   add({ caseId, filename, mimeType, sizeBytes, extractedText, pageCount = 1, metadata = {} }) {
     const db = getDb();
@@ -784,5 +913,14 @@ export const documentsRepo = {
       params.push(caseId);
     }
     return db.prepare(query).get(...params);
+  },
+
+  remove(docId, caseId) {
+    const db = getDb();
+    const res = db.prepare("DELETE FROM evidence_documents WHERE id = ? AND case_id = ?").run(docId, caseId);
+    if (res.changes > 0) {
+      auditRepo.log(caseId, "document_deleted", "user", { docId });
+    }
+    return res.changes > 0;
   },
 };

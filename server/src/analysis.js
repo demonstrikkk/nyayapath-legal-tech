@@ -594,6 +594,7 @@ export async function analyse(rawInput) {
       topK: 12,
       boostIds: issueBoostIds,
       minScore: 0.03,
+      homeJurisdiction: input.location || "",
     }),
     retrieval.retrieve({
       collection: "provisions",
@@ -602,6 +603,7 @@ export async function analyse(rawInput) {
       boostIds: [...defaultProvisionIds],
       filterCategories: retrievalCategoryIds,
       minScore: 0.02,
+      homeJurisdiction: input.location || "",
     }),
   ]);
 
@@ -705,6 +707,7 @@ export async function analyse(rawInput) {
       query: narrativeQuery,
       topK: 6,
       minScore: 0.03,
+      homeJurisdiction: input.location || "",
     }),
     retrieval.retrieve({
       collection: "judgments",
@@ -712,6 +715,7 @@ export async function analyse(rawInput) {
       topK: 5,
       filterCategories: retrievalCategoryIds,
       minScore: 0.03,
+      homeJurisdiction: input.location || "",
     }),
   ]);
 
@@ -766,7 +770,13 @@ export async function analyse(rawInput) {
   // A pro se person needs to know what paper to file, not just which section
   // applies, so the actual applications are surfaced alongside the plan.
   const actionPlanSelection = actionPlanKeyFor(detectedIssues, researchCategories, primaryId);
-  const canShowActionPlan = detectedIssues.length > 0 || provisions.length > 0;
+  // A weak or moderate lexical match is not a legal issue. A larger corpus
+  // makes almost any narrative share a word with some section, so a plan is
+  // shown only when the narrative raised an issue or a provision matched
+  // strongly. Otherwise the vague-input case would acquire a plan it never
+  // justified.
+  const canShowActionPlan =
+    detectedIssues.length > 0 || provisions.some((p) => p.relevance === "strong");
   const selectedPlanCategory = kb.category_by_id(actionPlanSelection.key);
   let actionPlanNote = null;
   if (!canShowActionPlan) {
@@ -1020,6 +1030,13 @@ export async function analyse(rawInput) {
       model: ai.ok ? ai.model : null,
       reason: ai.ok ? null : ai.reason,
       message: ai.ok ? null : ai.message,
+      // Why the model was not used, in enough detail to act on: a spent
+      // daily quota and a per-minute limit need different responses.
+      providerMessage: ai.ok ? null : ai.providerMessage || null,
+      scope: ai.ok ? null : ai.scope || null,
+      retryAfterSeconds: ai.ok ? null : ai.retryAfterSeconds ?? null,
+      quotaExhausted: ai.ok ? false : Boolean(ai.quotaExhausted),
+      modelsTried: ai.ok ? ai.modelsTried || null : ai.modelsTried || null,
       durationMs: ai.durationMs ?? null,
       notices: ai.ok ? ai.notices : [],
       result: ai.ok

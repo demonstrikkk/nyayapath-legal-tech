@@ -202,7 +202,7 @@ export default function NewWorkspaceInterview({
       name: "Senior Advocate Deshmukh",
       time: "Initial Intake",
       text:
-        "Welcome to NyayaPath Legal Enclave. I am Senior Advocate Deshmukh.\n\nTo properly register and prepare your case workspace, I need to interrogate the factual foundation of your dispute. Please describe what happened in your own words, and upload any notices, agreements, bank statements, or WhatsApp evidence.\n\nI will analyze applicable Indian statutes (including BNS/BNSS criminal transitions), identify missing legal proofs, ask clarifying questions, and configure your case workspace.",
+        "Welcome to JollyLLM Legal Enclave. I am Senior Advocate Deshmukh.\n\nTo properly register and prepare your case workspace, I need to interrogate the factual foundation of your dispute. Please describe what happened in your own words, and upload any notices, agreements, bank statements, or WhatsApp evidence.\n\nI will analyze applicable Indian statutes (including BNS/BNSS criminal transitions), identify missing legal proofs, ask clarifying questions, and configure your case workspace.",
     },
   ]);
 
@@ -262,6 +262,9 @@ export default function NewWorkspaceInterview({
         name: file.name,
         size: `${(file.size / 1024).toFixed(1)} KB`,
         text: extractedText,
+        // The file itself is kept so it can be filed against the case once the
+        // workspace exists. Without it the upload would be read and dropped.
+        file,
         uploadedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       };
 
@@ -273,8 +276,8 @@ export default function NewWorkspaceInterview({
       const previewSnippet = extractedText.slice(0, 400).trim();
       const docNoticeMsg = {
         id: "doc_" + Date.now(),
-        sender: "client",
-        name: "Litigant Deponent",
+        sender: "document",
+        name: "Attached Document",
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         text: `[Attached Supporting Document: ${file.name}]\nDocument excerpt: "${previewSnippet}${extractedText.length > 400 ? "..." : ""}"`,
       };
@@ -298,7 +301,7 @@ export default function NewWorkspaceInterview({
     setIsAnalyzing(true);
 
     const msgsToSend = (explicitMessages || messages).map((m) => ({
-      sender: m.sender === "advocate" ? "assistant" : "client",
+      sender: m.sender === "advocate" ? "assistant" : m.sender === "document" ? "document" : "client",
       text: m.text,
     }));
 
@@ -411,25 +414,37 @@ export default function NewWorkspaceInterview({
     setIsSubmitting(true);
 
     try {
-      // 1. Create workspace in DB
+      // The consultation is sent with the case so the server stores it once,
+      // with each turn keeping the sender it actually had. Only the client's
+      // own statements become facts: replaying the transcript through the
+      // live message endpoint would have recorded the advocate's questions
+      // as client allegations, and run the model once per turn.
+      const turns = messages.map((m) => ({
+        sender:
+          m.sender === "advocate"
+            ? "assistant"
+            : m.sender === "document"
+              ? "document"
+              : "client",
+        text: m.text,
+      }));
+
       const res = await api.createCase({
         title: finalTitle,
         category: finalCat,
         jurisdiction: jurisdiction,
-        narrative: extractedFacts.join(". "),
+        transcript: turns,
       });
 
       if (res?.case) {
-        // 2. Persist recorded consultation messages to this workspace
-        try {
-          for (const msg of messages.slice(1)) {
-            await api.sendMessage(res.case.id, {
-              content: msg.text,
-              sender: msg.sender === "client" ? "user" : "assistant",
-            });
+        // File the uploaded documents against the same workspace.
+        for (const record of uploadedFiles) {
+          if (!record.file) continue;
+          try {
+            await api.uploadCaseDocument(res.case.id, record.file);
+          } catch (err) {
+            onToast?.(`Document "${record.name}" was read but not filed: ${err.message}`);
           }
-        } catch {
-          // Non-blocking
         }
 
         onToast?.(`Workspace "${finalTitle}" initialized successfully`);

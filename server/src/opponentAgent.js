@@ -147,13 +147,13 @@ Conduct a rigorous adversarial examination and return ONLY valid JSON matching t
   }
 }`;
 
-      const res = await llm.chatCompletion({
-        model: process.env.REASONING_LLM_MODEL || "openai/gpt-oss-120b",
+      const res = await llm.chatCompletionWithFallback({
+        model: process.env.REASONING_LLM_MODEL || llm.configuredModel(),
         temperature: 0.2,
-        maxTokens: 2500,
+        maxTokens: 2000,
         messages: [{ role: "user", content: prompt }],
         jsonMode: true,
-        timeoutMs: 20000,
+        timeoutMs: 25000,
       });
 
       if (res.ok && res.data && res.data.opposingTheory) {

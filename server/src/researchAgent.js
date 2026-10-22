@@ -13,9 +13,18 @@
 
 import * as kb from "./knowledge.js";
 import * as retrieval from "./retrievalClient.js";
-import { researchRepo, casesRepo, auditRepo } from "./db.js";
+import { researchRepo, casesRepo, auditRepo, authoritiesRepo } from "./db.js";
 import * as llm from "./llm.js";
+import * as datagoblinClient from "./datagoblinClient.js";
+import { authorityFromCorpus, authorityFromDatagoblin } from "./authorities.js";
 
+/**
+ * The official sites a citation may be checked against.
+ *
+ * These are places the reader can go to verify a citation. The research
+ * itself runs over the bundled corpus, and over datagoblin when it is
+ * configured; it does not crawl these sites.
+ */
 const APPROVED_DOMAINS = [
   "indiacode.nic.in",
   "main.sci.gov.in",
@@ -48,6 +57,7 @@ export async function runLegalResearch(caseId, queryText) {
       topK: 6,
       filterCategory: detectedCategory,
       mode: "hybrid",
+      homeJurisdiction: caseObj.jurisdiction || "Delhi",
     }),
     retrieval.retrieve({
       collection: "judgments",
@@ -55,8 +65,38 @@ export async function runLegalResearch(caseId, queryText) {
       topK: 5,
       filterCategory: detectedCategory,
       mode: "hybrid",
+      homeJurisdiction: caseObj.jurisdiction || "Delhi",
     }),
   ]);
+
+  // 1b. Ask datagoblin, when it is configured.
+  //
+  // Only the legal query travels. The client's narrative, name and documents
+  // stay in this process. A datagoblin outage degrades to the bundled
+  // corpus, so the research still returns something.
+  let datagoblin = { used: false };
+  if (datagoblinClient.isConfigured()) {
+    try {
+      const terms = datagoblinClient.legalSearchTerms(caseObj, []);
+      const searchTerm = terms.length ? terms.join(" ") : cleanQuery;
+      const found = await datagoblinClient.searchRecords(searchTerm, { limit: 10 });
+      datagoblin = {
+        used: true,
+        datasetId: found.datasetId,
+        query: searchTerm,
+        total: found.total,
+        records: found.records,
+        authorities: found.records
+          .map((row) => authorityFromDatagoblin(row))
+          .filter(Boolean),
+      };
+      authoritiesRepo.saveMany(caseId, datagoblin.authorities);
+    } catch (err) {
+      // The bundled corpus answer is still valid, so this is a degradation
+      // and not a failure. The reason is kept for the run record.
+      datagoblin = { used: false, error: String(err?.message || err).slice(0, 200) };
+    }
+  }
 
   const acts = kb.acts();
   const matchedProvisions = (provResult.ok && provResult.results ? provResult.results : []).map((p) => ({
@@ -104,13 +144,13 @@ Provide a concise, 3-paragraph synthesis:
 3. Exceptions, contrary considerations, or evidentiary hurdles.
 Return ONLY valid JSON: {"synthesis": "...", "keyAuthorities": ["..."], "caveat": "..."}`;
 
-      const res = await llm.chatCompletion({
-        model: process.env.REASONING_LLM_MODEL || "openai/gpt-oss-120b",
+      const res = await llm.chatCompletionWithFallback({
+        model: process.env.REASONING_LLM_MODEL || llm.configuredModel(),
         temperature: 0.2,
         maxTokens: 1200,
         messages: [{ role: "user", content: prompt }],
         jsonMode: true,
-        timeoutMs: 15000,
+        timeoutMs: 20000,
       });
 
       if (res.ok && res.data?.synthesis) {
@@ -122,21 +162,60 @@ Return ONLY valid JSON: {"synthesis": "...", "keyAuthorities": ["..."], "caveat"
   }
 
   if (!synthesis) {
-    synthesis = `Research concluded for "${cleanQuery}". Found ${matchedProvisions.length} applicable central statutory provisions and ${matchedJudgments.length} judicial precedents from the Supreme Court of India. All citations are cross-referenced with official records and verifiable on India Code and Indian Kanoon.`;
+    synthesis = `Research concluded for "${cleanQuery}". Found ${matchedProvisions.length} applicable statutory provisions and ${matchedJudgments.length} judicial precedents in the bundled corpus. Each citation links to its source so it can be verified.`;
   }
+
+  // What was actually consulted. This names the real sources rather than a
+  // list of places the researcher did not go.
+  const sourcesUsed = ["bundled-corpus"];
+  if (datagoblin?.used) sourcesUsed.push("datagoblin");
 
   const findings = {
     query: cleanQuery,
     provisions: matchedProvisions,
     judgments: matchedJudgments,
-    approvedSources: APPROVED_DOMAINS,
+    datagoblin: datagoblin?.used ? datagoblin : null,
+    sourcesUsed,
     timestamp: new Date().toISOString(),
   };
+
+  // The authorities this case relied on are recorded against the case, so the
+  // dossier can show what the advice was built on.
+  const authorities = [
+    ...matchedProvisions.map((p) =>
+      authorityFromCorpus(
+        {
+          id: p.id,
+          act: p.act,
+          section: p.section,
+          heading: p.heading,
+          summary: p.summary,
+          sourceUrl: p.sourceUrl,
+        },
+        { score: p.score },
+      ),
+    ),
+    ...matchedJudgments.map((j) =>
+      authorityFromCorpus(
+        {
+          id: j.id,
+          title: j.title,
+          citation: j.citation,
+          court: j.court,
+          year: j.year,
+          ratio: j.ratio,
+          verifyUrl: j.verifyUrl,
+        },
+        { score: j.score },
+      ),
+    ),
+  ].filter(Boolean);
+  authoritiesRepo.saveMany(caseId, authorities);
 
   const saved = researchRepo.save(
     caseId,
     cleanQuery,
-    "India Code / Indian Kanoon / Bundled Corpus",
+    sourcesUsed.join(" + "),
     synthesis,
     findings,
   );

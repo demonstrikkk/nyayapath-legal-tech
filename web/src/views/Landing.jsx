@@ -58,7 +58,7 @@ export default function Landing({
       <section style={{ borderBottom: "1px solid var(--border)", padding: "72px 0 64px" }}>
         <div className="shell">
           <div style={{ marginBottom: 12 }}>
-            <span className="badge-note">NyayaPath — AI-Powered Indian Legal Assistant</span>
+            <span className="badge-note">JollyLLM — AI-Powered Indian Legal Assistant</span>
           </div>
 
           <h1 style={{
@@ -118,7 +118,7 @@ export default function Landing({
       <section style={{ padding: "48px 0", borderBottom: "1px solid var(--border)" }}>
         <div className="shell">
           <div style={{ marginBottom: 28 }}>
-            <span className="badge-note">What NyayaPath does</span>
+            <span className="badge-note">What JollyLLM does</span>
           </div>
           <div className="features-grid">
             {CAPABILITIES.map((cap, i) => (
@@ -317,7 +317,7 @@ export function Footer({ meta }) {
         gap: 10,
       }}>
         <span style={{ fontFamily: "var(--mono)", fontSize: "0.62rem", color: "var(--text-faint)", letterSpacing: "0.06em" }}>
-          NYAYAPATH \u2014 AI-POWERED INDIAN LEGAL ASSISTANT \u2014 LOCAL-FIRST
+          JollyLLM \u2014 AI-POWERED INDIAN LEGAL ASSISTANT \u2014 LOCAL-FIRST
         </span>
         <span style={{ fontFamily: "var(--mono)", fontSize: "0.62rem", color: "var(--text-faint)" }}>
           {meta?.sources?.length ? `${meta.sources.length} verified sources` : ""}
